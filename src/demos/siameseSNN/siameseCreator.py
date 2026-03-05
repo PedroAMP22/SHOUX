@@ -1,12 +1,7 @@
-"""
-In this code we propose a siamese SNNs architecture to compare similarity
-between audios. We will use some soa metris to evaluate our model.
-
-
-"""
 import torch
 import torch.nn.functional as F
 import numpy as np
+import os 
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -16,51 +11,61 @@ from classes import SiameseAudioMNIST, SiameseSNN
 
 # --- CONFIGURACIÓN ---
 DATA_ROOT = "AudioMNIST_split"
-BACKBONE_PATH = "./src/demos/siameseSNN/models/snn_pop_audio.pth"
+BACKBONE_PATH = "src/demos/siameseSNN/models/snn_pop_audio_explainable.pth" 
 SIAMESE_SAVE_PATH = "./src/demos/siameseSNN/models/snn_siamese_model.pt"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def add_white_noise(waveform, snr_db=0):
-    """Añade ruido blanco Gaussiano para el test de robustez"""
+    """Añade ruido y re-normaliza para mantener la dinámica de la SNN"""
     std = waveform.std()
     if std == 0: return waveform
     noise_std = std / (10**(snr_db/20))
     noise = torch.randn_like(waveform) * noise_std
-    return waveform + noise
+    noisy_waveform = waveform + noise
+    # Re-normalización crítica para que el backbone no se sature ante el ruido
+    return noisy_waveform / (noisy_waveform.abs().max() + 1e-8)
 
-# --- 5. ENTRENAMIENTO Y EVALUACIÓN COMPARATIVA ---
+# --- ENTRENAMIENTO Y EVALUACIÓN ---
 def contrastive_loss(emb1, emb2, label, margin=1.0):
     dist = F.pairwise_distance(emb1, emb2)
+    # label=1 (mismo), label=0 (diferente)
     return torch.mean(label * torch.pow(dist, 2) + (1-label) * torch.pow(torch.clamp(margin-dist, min=0.0), 2))
 
 if __name__ == "__main__":
-    # A. Entrenar Siamesa
+    # Inicializar modelo (SiameseSNN ahora usa el backbone de 250 expertos)
     model = SiameseSNN(BACKBONE_PATH).to(device)
-    optimizer = torch.optim.Adam(model.fc_siamese.parameters(), lr=1e-3)
-    train_loader = DataLoader(SiameseAudioMNIST(f"{DATA_ROOT}/train"), batch_size=32, shuffle=True)
-
-    print("Entrenando Red Siamesa...")
-    for epoch in range(5):
-        model.train()
-        total_loss = 0
-        for x1, x2, label in tqdm(train_loader):
-            x1, x2, label = x1.to(device), x2.to(device), label.to(device)
-            optimizer.zero_grad()
-            emb1, emb2 = model(x1, x2)
-            loss = contrastive_loss(emb1, emb2, label)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch {epoch+1} - Loss: {total_loss/len(train_loader):.4f}")
     
-    torch.save(model.state_dict(), SIAMESE_SAVE_PATH)
+    # --- A. VERIFICAR SI EL MODELO YA EXISTE ---
+    if os.path.exists(SIAMESE_SAVE_PATH):
+        print(f"Modelo encontrado en {SIAMESE_SAVE_PATH}. Cargando pesos...")
+        model.load_state_dict(torch.load(SIAMESE_SAVE_PATH, map_location=device))
+    else:
+        print("Modelo no encontrado. Iniciando entrenamiento de la Red Siamesa...")
+        # Entrenamos solo la capa de proyección siamesa
+        optimizer = torch.optim.Adam(model.fc_siamese.parameters(), lr=1e-3)
+        train_loader = DataLoader(SiameseAudioMNIST(f"{DATA_ROOT}/train"), batch_size=32, shuffle=True)
 
-    # B. Evaluación en Test (Limpio y con Ruido)
-    print("\nEvaluando modelo...")
+        for epoch in range(5):
+            model.train()
+            total_loss = 0
+            for x1, x2, label in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+                x1, x2, label = x1.to(device), x2.to(device), label.to(device)
+                optimizer.zero_grad()
+                emb1, emb2 = model(x1, x2)
+                loss = contrastive_loss(emb1, emb2, label)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            print(f"Loss: {total_loss/len(train_loader):.4f}")
+        
+        torch.save(model.state_dict(), SIAMESE_SAVE_PATH)
+        print(f"Guardado en {SIAMESE_SAVE_PATH}")
+
+    # --- B. EVALUACIÓN ---
+    print("\nIniciando Benchmark...")
     model.eval()
     
-    # Vamos a evaluar dos veces: una en limpio y otra a 0dB (mucho ruido)
     for mode in ["Limpio", "Ruido_0dB"]:
         all_distances = []
         all_labels = []
@@ -77,8 +82,7 @@ if __name__ == "__main__":
                 
                 x1, x2 = x1.to(device), x2.to(device)
                 
-                # IMPORTANTE: Tu modelo debe devolver los spikes para medir energía
-                # Si tu forward de SiameseSNN devuelve (emb1, emb2, spk_hid1, spk_hid2)
+                # forward_full devuelve los tensores de spikes para medir energía
                 emb1, emb2, spk1, spk2 = model.forward_full(x1, x2) 
                 
                 dist = F.pairwise_distance(emb1, emb2)
@@ -86,26 +90,23 @@ if __name__ == "__main__":
                 all_distances.extend(dist.cpu().numpy())
                 all_labels.extend(label.cpu().numpy())
                 
-                # Contar spikes para métrica de energía
+                # Energía: spikes de la capa de expertos (250 neuronas)
                 total_spikes_layer += (spk1.sum().item() + spk2.sum().item())
                 total_neurons_steps += (spk1.numel() + spk2.numel())
 
-        # --- CÁLCULOS ROC / YOUDEN (Igual que tu código) ---
+        # Métricas
         all_distances = np.array(all_distances)
         all_labels = np.array(all_labels)
-        scores = -all_distances
+        scores = -all_distances # Menor distancia = mayor score de similitud
         fpr, tpr, thresholds = roc_curve(all_labels, scores)
         roc_auc = auc(fpr, tpr)
+        
         optimal_idx = np.argmax(tpr - fpr)
         opt_threshold = -thresholds[optimal_idx]
         predictions = (all_distances <= opt_threshold).astype(int)
         acc = accuracy_score(all_labels, predictions)
         
-        # --- MÉTRICA DE ENERGÍA ---
         firing_rate = (total_spikes_layer / total_neurons_steps) * 100
 
-        print(f"\n--- RESULTADOS {mode} ---")
-        print(f"Accuracy: {acc*100:.2f}% | AUC: {roc_auc:.4f}")
-        print(f"Firing Rate (Actividad): {firing_rate:.2f}%")
-        # El ahorro energético es: (1 - (Firing_Rate_SNN / Actividad_DNN_aprox_50%))
-        print(f"Umbral óptimo: {opt_threshold:.4f}")
+        print(f"\nRESULTADOS: {mode}")
+        print(f"Accuracy: {acc*100:.2f}% | AUC: {roc_auc:.4f} | Firing Rate: {firing_rate:.2f}%")
