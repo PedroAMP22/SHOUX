@@ -66,38 +66,35 @@ if __name__ == "__main__":
     print("\nIniciando Benchmark...")
     model.eval()
     
-    for mode in ["Limpio", "Ruido_0dB"]:
-        all_distances = []
-        all_labels = []
-        total_spikes_layer = 0
-        total_neurons_steps = 0
+    
+    all_distances = []
+    all_labels = []
+    total_spikes_layer = 0
+    total_neurons_steps = 0
 
-        test_loader = DataLoader(SiameseAudioMNIST(f"{DATA_ROOT}/test"), batch_size=32, shuffle=False)
+    test_loader = DataLoader(SiameseAudioMNIST(f"{DATA_ROOT}/test"), batch_size=32, shuffle=False)
 
-        with torch.no_grad():
-            for x1, x2, label in tqdm(test_loader, desc=f"Evaluando {mode}"):
-                if mode == "Ruido_0dB":
-                    x1 = add_white_noise(x1, snr_db=0)
-                    x2 = add_white_noise(x2, snr_db=0)
-                
-                x1, x2 = x1.to(device), x2.to(device)
-                
-                # forward_full devuelve los tensores de spikes para medir energía
-                emb1, emb2, spk1, spk2 = model.forward_full(x1, x2) 
-                
-                dist = F.pairwise_distance(emb1, emb2)
-                
-                all_distances.extend(dist.cpu().numpy())
-                all_labels.extend(label.cpu().numpy())
-                
-                # Energía: spikes de la capa de expertos (250 neuronas)
-                total_spikes_layer += (spk1.sum().item() + spk2.sum().item())
-                total_neurons_steps += (spk1.numel() + spk2.numel())
+    with torch.no_grad():
+        for x1, x2, label in tqdm(test_loader, desc=f"Evaluando"):
+            
+            x1, x2 = x1.to(device), x2.to(device)
+            
+            # forward_full devuelve los tensores de spikes para medir energía
+            emb1, emb2, spk1, spk2 = model.forward_full(x1, x2) 
+            
+            dist = F.pairwise_distance(emb1, emb2)
+            
+            all_distances.extend(dist.cpu().numpy())
+            all_labels.extend(label.cpu().numpy())
+            
+            # Energía: spikes de la capa de expertos (250 neuronas)
+            total_spikes_layer += (spk1.sum().item() + spk2.sum().item())
+            total_neurons_steps += (spk1.numel() + spk2.numel())
 
         # Métricas
         all_distances = np.array(all_distances)
         all_labels = np.array(all_labels)
-        scores = -all_distances # Menor distancia = mayor score de similitud
+        scores = -all_distances 
         fpr, tpr, thresholds = roc_curve(all_labels, scores)
         roc_auc = auc(fpr, tpr)
         
@@ -108,5 +105,5 @@ if __name__ == "__main__":
         
         firing_rate = (total_spikes_layer / total_neurons_steps) * 100
 
-        print(f"\nRESULTADOS: {mode}")
+        print(f"\nRESULTADOS:")
         print(f"Accuracy: {acc*100:.2f}% | AUC: {roc_auc:.4f} | Firing Rate: {firing_rate:.2f}%")

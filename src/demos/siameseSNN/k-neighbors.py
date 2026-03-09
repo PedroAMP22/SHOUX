@@ -1,12 +1,10 @@
 import random
-import math
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import  DataLoader
+from torch.utils.data import DataLoader
 import torchaudio
-import snntorch as snn
-import pywt 
+import pywt  
 
 from classes import SiameseSNN, AudioMNISTEvalDataset
 
@@ -14,211 +12,168 @@ from classes import SiameseSNN, AudioMNISTEvalDataset
 # 1. GLOBAL SNN PARAMETERS
 # ==========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-beta = 0.9
-v_threshold = 1.0
-num_steps = 50
-spike_grad = snn.surrogate.fast_sigmoid(slope=15)
 DATA_ROOT = "AudioMNIST_split"
 BACKBONE_PATH = "src/demos/siameseSNN/models/snn_pop_audio_explainable.pth" 
 SIAMESE_SAVE_PATH = "./src/demos/siameseSNN/models/snn_siamese_model.pt"
 
 # ==========================================
+# 2. VAD Y VAN ROSSUM
+# ==========================================
+def apply_vad_and_align(waveform, threshold_ratio=0.05):
+    abs_wave = waveform.abs().squeeze(0)
+    max_amp = abs_wave.max()
+    threshold = max_amp * threshold_ratio
+    active_indices = torch.where(abs_wave > threshold)[0]
+    if len(active_indices) == 0: return waveform
+    start_idx = active_indices[0].item()
+    cropped = waveform[:, start_idx:]
+    return torch.nn.functional.pad(cropped, (0, waveform.size(1) - cropped.size(1)))
+
+def van_rossum_distance(spk1, spk2, tau=0.1):
+    """
+    spk1, spk2: [num_steps, num_neurons]
+    """
+    T = spk1.size(0)
+    t = torch.arange(T, device=spk1.device).float()
+    kernel = torch.exp(-t / (tau * T)).view(1, 1, -1)
+    
+    # Convolución por neurona (spk1.t() es [neuronas, steps])
+    f1 = F.conv1d(spk1.t().unsqueeze(1), kernel, padding=T-1)[:, :, :T]
+    f2 = F.conv1d(spk2.t().unsqueeze(1), kernel, padding=T-1)[:, :, :T]
+    return torch.sqrt(torch.sum((f1 - f2)**2))
+
+# ==========================================
 # 3. BASELINE FEATURE EXTRACTORS
 # ==========================================
 def extract_mfcc(waveform, sample_rate=8000):
+    aligned_wave = apply_vad_and_align(waveform)
     mfcc_transform = torchaudio.transforms.MFCC(
         sample_rate=sample_rate, n_mfcc=13,
         melkwargs={"n_fft": 400, "hop_length": 160, "n_mels": 23, "center": False}
     )
-    mfcc = mfcc_transform(waveform)
-    return mfcc.mean(dim=2).squeeze(0) 
+    mfcc = mfcc_transform(aligned_wave)
+    
+    return mfcc.contiguous().reshape(-1)
 
-def extract_dwt(waveform, wavelet='db4'):
-    wave_np = waveform.squeeze(0).numpy()
-    cA, cD = pywt.dwt(wave_np, wavelet)
-    return torch.tensor(np.concatenate((cA, cD)), dtype=torch.float32)
+def extract_dwt(waveform, wavelet='db4', level=4):
+    aligned_wave = apply_vad_and_align(waveform)
+    wave_np = aligned_wave.squeeze(0).numpy()
+    coeffs = pywt.wavedec(wave_np, wavelet, level=level)
+    features = []
+    for c in coeffs:
+        features.extend([np.mean(c), np.std(c), np.sum(c**2)])
+    features = np.array(features)
+    norm = np.linalg.norm(features)
+    return torch.tensor(features / (norm + 1e-9), dtype=torch.float32)
 
 def extract_raw(waveform):
-    return waveform.squeeze(0)
+    return apply_vad_and_align(waveform).squeeze(0)
 
 # ==========================================
-# 4. UNIFIED DATABASE BUILDER
+# 4. BUILDER
 # ==========================================
 def build_all_databases(model, dataloader, device):
-    db = {
-        'snn': [], 'mfcc':[], 'dwt':[], 'pearson': [],
-        'labels': [], 'filenames':[]
-    }
-    
-    print("Building unified database for all methods... Please wait.")
+    db = {'snn':[], 'spikes':[], 'mfcc':[], 'dwt':[], 'pearson': [], 'labels': [], 'filenames':[]}
+    print("Building database...")
     model.eval()
     with torch.no_grad():
         for waveforms, labels, filenames in dataloader:
+            # waveforms viene como [32, 1, 8000] (si el dataset ya tiene el canal)
+            # o [32, 8000] (si no lo tiene).
+            
+            # Si tiene 4 dimensiones [32, 1, 1, 8000], lo aplanamos a 3D
+            if waveforms.dim() == 4:
+                waveforms = waveforms.squeeze(2) # Elimina la dimensión extra
+            
+            # Si solo tiene 2 dimensiones [32, 8000], añadimos el canal
+            elif waveforms.dim() == 2:
+                waveforms = waveforms.unsqueeze(1)
+            
+            # Ahora waveforms es [32, 1, 8000]
             waveforms_gpu = waveforms.to(device)
-            snn_embs, _ = model.get_embedding(waveforms_gpu)
+            
+            snn_embs, spk_hid = model.get_embedding(waveforms_gpu)
             db['snn'].append(snn_embs.cpu())
+            db['spikes'].append(spk_hid.cpu())
             
             for i in range(waveforms.size(0)):
                 wave = waveforms[i]
                 db['mfcc'].append(extract_mfcc(wave).unsqueeze(0))
                 db['dwt'].append(extract_dwt(wave).unsqueeze(0))
                 db['pearson'].append(extract_raw(wave).unsqueeze(0))
-                
                 db['labels'].append(labels[i].item())
                 db['filenames'].append(filenames[i])
 
     db['snn'] = torch.cat(db['snn'], dim=0)
+    db['spikes'] = torch.cat(db['spikes'], dim=1).transpose(0, 1) # [N, steps, neurons]
     db['mfcc'] = torch.cat(db['mfcc'], dim=0)
     db['dwt'] = torch.cat(db['dwt'], dim=0)
     db['pearson'] = torch.cat(db['pearson'], dim=0)
-    
-    print(f"Database built! Total samples: {len(db['labels'])}")
     return db
 
 # ==========================================
-# 5. UNIFIED K-NN RETRIEVAL & RMSE
+# 5. EVALUATION
 # ==========================================
-def evaluate_query(query_waveform, query_label, query_filename, model, db, k=5, device='cuda', verbose=True):
-    if verbose:
-        print(f"\n{'='*50}")
-        print(f"QUERY: {query_filename} (True Label = {query_label})")
-        print(f"{'='*50}")
-    
-    if query_waveform.dim() == 2:
-        query_waveform = query_waveform.unsqueeze(0)
-        
+def evaluate_query(q_wave, q_label, q_fname, model, db, k=5, device='cuda'):
     model.eval()
+    if q_wave.dim() == 2:
+        q_wave = q_wave.unsqueeze(0) # Si era [1, 8000], ahora es [1, 1, 8000]
+    elif q_wave.dim() == 1:
+        q_wave = q_wave.unsqueeze(0).unsqueeze(0) # Si era [8000], ahora es [1, 1, 8000]
     with torch.no_grad():
-        q_snn, _ = model.get_embedding(query_waveform.to(device))
-        q_snn = q_snn.cpu()
+        q_snn, q_spk = model.get_embedding(q_wave.to(device))
+        q_snn, q_spk = q_snn.cpu(), q_spk.cpu().squeeze(1) # [steps, neurons]
+
+    q_mfcc = extract_mfcc(q_wave.squeeze(0)).unsqueeze(0)
+    q_dwt = extract_dwt(q_wave.squeeze(0)).unsqueeze(0)
+    q_pearson = extract_raw(q_wave.squeeze(0)).unsqueeze(0)
+
+    # 1. Métodos Estándar
+    results = {}
+    feats = {"SNN Siamese": (q_snn, db['snn'], "euclidean"), "MFCC": (q_mfcc, db['mfcc'], "cosine"),
+             "DWT": (q_dwt, db['dwt'], "euclidean"), "Pearson": (q_pearson, db['pearson'], "pearson")}
+
+    for name, (q_f, d_f, mode) in feats.items():
+        if mode == "euclidean": dists = torch.cdist(q_f, d_f, p=2).squeeze(0)
+        elif mode == "cosine": dists = 1 - F.cosine_similarity(q_f, d_f)
+        else: # Pearson
+            q_c = q_f - q_f.mean(); d_c = d_f - d_f.mean(dim=1, keepdim=True)
+            dists = 1 - F.cosine_similarity(q_c, d_c)
         
-    q_mfcc = extract_mfcc(query_waveform.squeeze(0)).unsqueeze(0)
-    q_dwt = extract_dwt(query_waveform.squeeze(0)).unsqueeze(0)
-    q_pearson = extract_raw(query_waveform.squeeze(0)).unsqueeze(0)
+        # Filtrado para Precision
+        _, idxs = torch.topk(dists, k + 1, largest=False)
+        labels = [db['labels'][idx] for idx in idxs if db['filenames'][idx] != q_fname][:k]
+        results[name] = sum([1 for l in labels if l == q_label]) / k
 
-    methods = {
-        "SNN Siamese": (q_snn, db['snn'], "euclidean"),
-        "MFCC": (q_mfcc, db['mfcc'], "cosine"),
-        "DWT": (q_dwt, db['dwt'], "euclidean"),
-        "Pearson": (q_pearson, db['pearson'], "pearson")
-    }
+    # 2. Van Rossum (Re-ranking sobre top 20 para eficiencia)
+    dists_snn = torch.cdist(q_snn, db['snn'], p=2).squeeze(0)
+    top20_idx = torch.topk(dists_snn, 20, largest=False)[1]
+    vr_dists = torch.tensor([van_rossum_distance(q_spk, db['spikes'][i]) for i in top20_idx])
+    final_vr_idx = top20_idx[torch.argsort(vr_dists)][:k]
+    vr_labels = [db['labels'][i] for i in final_vr_idx]
+    results["Van Rossum"] = sum([1 for l in vr_labels if l == q_label]) / k
 
-    results_summary = {}
+    return results
 
-    for method_name, (q_feat, db_feats, dist_type) in methods.items():
-        if dist_type == "euclidean":
-            distances = torch.cdist(q_feat, db_feats, p=2).squeeze(0)
-        elif dist_type == "cosine":
-            cos_sim = F.cosine_similarity(q_feat, db_feats)
-            distances = 1 - cos_sim
-        elif dist_type == "pearson":
-            q_centered = q_feat - q_feat.mean()
-            db_centered = db_feats - db_feats.mean(dim=1, keepdim=True)
-            pearson_corr = F.cosine_similarity(q_centered, db_centered)
-            distances = 1 - pearson_corr
-
-        # Get Top K+1 (to account for the query itself being in the database)
-        topk_distances, topk_indices = torch.topk(distances, k + 1, largest=False)
-        
-        retrieved_labels =[]
-        if verbose:
-            print(f"\n--- {method_name} ---")
-            
-        valid_count = 0
-        for i in range(k + 1):
-            idx = topk_indices[i].item()
-            fname = db['filenames'][idx]
-            
-            # EXCLUDE THE QUERY ITSELF
-            if fname == query_filename:
-                continue
-                
-            lbl = db['labels'][idx]
-            dist = topk_distances[i].item()
-            retrieved_labels.append(lbl)
-            
-            if verbose:
-                print(f"  Rank {valid_count+1}: Label = {lbl} | Dist = {dist:.4f} | File = {fname}")
-                
-            valid_count += 1
-            if valid_count == k:
-                break
-
-        # Calculate Label RMSE
-        squared_errors =[(lbl - query_label) ** 2 for lbl in retrieved_labels]
-        rmse = math.sqrt(sum(squared_errors) / k)
-        results_summary[method_name] = rmse
-        
-        if verbose:
-            print(f"  >> Label RMSE: {rmse:.4f}")
-
-    return results_summary
-
-# ==========================================
-# 6. MAIN EXECUTION
-# ==========================================
 if __name__ == "__main__":
-    # 1. Initialize Model
-    model = SiameseSNN(backbone_path=BACKBONE_PATH).to(device)
-    model.load_state_dict(torch.load(SIAMESE_SAVE_PATH, map_location=device))
+    model = SiameseSNN(BACKBONE_PATH).to(device)
 
-    # 2. Load Dataset
-    dataset = AudioMNISTEvalDataset(split_dir=DATA_ROOT+"/test", sample_rate=8000)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
+    checkpoint = torch.load(SIAMESE_SAVE_PATH, map_location=device)
+    state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
+    model.load_state_dict(state_dict, strict=True) 
 
-    # 3. Build Unified Database
-    db = build_all_databases(model, dataloader, device)
-
-    # 4. Evaluate 100 Random Samples
-    N_EVALS = 100
-    # Ensure we don't try to sample more than the dataset size
-    num_samples = min(N_EVALS, len(dataset))
     
-    print(f"\nEvaluating {num_samples} random queries to calculate average RMSE...")
-    
-    # Randomly select indices without replacement
-    query_indices = random.sample(range(len(dataset)), num_samples)
-    
-    # Dictionary to keep track of cumulative RMSEs
-    avg_rmses = {
-        "SNN Siamese": 0.0,
-        "MFCC": 0.0,
-        "DWT": 0.0,
-        "Pearson": 0.0
-    }
+    print("Modelo cargado correctamente ignorando buffers estadísticos.")
 
-    for i, query_idx in enumerate(query_indices):
-        query_waveform, query_label, query_filename = dataset[query_idx]
-        
-        # Print a progress update every 10 samples
-        if (i + 1) % 10 == 0:
-            print(f"Processing query {i + 1}/{num_samples}...")
-            
-        # Run evaluation (verbose=False to avoid terminal spam)
-        rmses = evaluate_query(
-            query_waveform=query_waveform,
-            query_label=query_label,
-            query_filename=query_filename,
-            model=model,
-            db=db,
-            k=5,
-            device=device,
-            verbose=False
-        )
-        
-        # Accumulate the RMSEs
-        for method in avg_rmses:
-            avg_rmses[method] += rmses[method]
+    test_ds = AudioMNISTEvalDataset(f"{DATA_ROOT}/test")
+    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False) # Agregamos batch_size   
+    db = build_all_databases(model, test_loader, device)
 
-    # 5. Calculate and Print Final Averages
-    for method in avg_rmses:
-        avg_rmses[method] /= num_samples
+    avg_prec = {m: 0.0 for m in ["SNN Siamese", "MFCC", "DWT", "Pearson", "Van Rossum"]}
+    for i in random.sample(range(len(test_ds)), 100):
+        res = evaluate_query(*test_ds[i], model, db)
+        for m in avg_prec: avg_prec[m] += res[m]
 
-    print(f"\n{'-'*50}")
-    print(f"FINAL AVERAGE RMSE COMPARISON ({num_samples} Queries)")
-    print(f"{'-'*50}")
-    
-    # Sort methods by lowest average RMSE
-    sorted_methods = sorted(avg_rmses.items(), key=lambda x: x[1])
-    for rank, (method, rmse) in enumerate(sorted_methods):
-        print(f"{rank+1}. {method}: {rmse:.4f}")
+    print(f"\n{'='*50}\nFINAL PRECISION@5 (Más alto es mejor)\n{'='*50}")
+    for m, p in sorted(avg_prec.items(), key=lambda x: x[1], reverse=True):
+        print(f"{m}: {p:.2f}%")

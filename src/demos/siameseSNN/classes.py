@@ -14,40 +14,49 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SiameseSNN(nn.Module):
     def __init__(self, backbone_path):
         super().__init__()
-        # 1. Intentamos cargar el nuevo (250 neuronas)
-        try:
-            self.backbone = PopNetAudio(num_neurons_hid=250, num_classes=10).to(device)
-            self.backbone.load_state_dict(torch.load(backbone_path, map_location=device)['model_state'])
-        except:
-            # 2. Si falla, cargamos el viejo (256 neuronas)
-            print("Cargando arquitectura antigua (256 neuronas)...")
-            self.backbone = PopNetAudio(num_neurons_hid=256, num_classes=10).to(device)
-            self.backbone.load_state_dict(torch.load(backbone_path, map_location=device)['model_state'])
+        checkpoint = torch.load(backbone_path, map_location=device)
+        state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
+        
+        num_neurons_hid = state_dict['fc1.weight'].shape[0]
+        
+        self.backbone = PopNetAudio(num_neurons_hid=num_neurons_hid, num_classes=10).to(device)
+        
+        self.backbone.load_state_dict(state_dict, strict=True)
             
-        # Congelamos el backbone
         for param in self.backbone.parameters():
             param.requires_grad = False
             
-        # Ajustamos la capa siamesa dinámicamente según lo que cargamos
-        input_dim = self.backbone.num_neurons_hid
+        self.backbone.eval()
+        
+        input_dim = self.backbone.num_neurons_hid * 2 
         self.fc_siamese = nn.Linear(input_dim, 128).to(device)
     
     def get_embedding(self, x):
-        self.backbone.eval() # OJO: Si quieres entrenar el backbone, pon .train()
+        self.backbone.eval()
         
-        # spk_hid es un tensor que viene del forward del backbone
-        _, spk_hid = self.backbone(x) 
+        # spk_hid_rec es [num_steps, batch, num_neurons_hid]
+        _, spk_hid_rec = self.backbone(x) 
         
-        # pathway_activity: suma de spikes en el tiempo [batch, 250]
-        pathway_activity = spk_hid.sum(dim=0) 
+        # 1. Tasa de disparo (lo que ya tenías)
+        firing_rate = spk_hid_rec.sum(dim=0) # [batch, 250]
         
-        # Proyección
-        out = self.fc_siamese(pathway_activity)
+        # 2. Latencia (Time-to-First-Spike)
+        # Buscamos el índice del primer paso donde ocurre un spike
+        # Si no hay spikes, ponemos num_steps (latencia máxima)
+        first_spike_idx = torch.argmax(spk_hid_rec, dim=0).float()
+        # Normalizamos entre 0 y 1
+        latency = first_spike_idx / num_steps 
         
-        # F.normalize es diferenciable, esto está bien
+        # 3. Combinamos: [batch, 250 + 250] = [batch, 500]
+        # Ahora el embedding tiene información de frecuencia Y de tiempo
+        combined_features = torch.cat([firing_rate, latency], dim=1)
+        
+        # Proyección (Asegúrate de que fc_siamese acepte 500 entradas)
+        out = self.fc_siamese(combined_features)
+        
         embedding = F.normalize(out, p=2, dim=1)
         
-        return embedding, spk_hid
+        return embedding, spk_hid_rec.sum(dim=0) # Mantenemos la compatibilidad
 
     def forward(self, x1, x2):
         emb1, _ = self.get_embedding(x1)
