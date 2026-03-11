@@ -32,45 +32,42 @@ model = PopNetAudio(num_neurons_hid=250, num_classes=10).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn = SF.ce_rate_loss()
 
-print(f"Iniciando entrenamiento en {device}...")
+print(f"Starting training on {device}...")
 for epoch in range(num_epochs):
     model.train()
     
-    # Aumentamos drásticamente la penalización de ortogonalidad
-    ortho_coeff = 0.1  # Antes era 0.001. Ahora sí dolerá equivocarse.
-    sparsity_coeff = 0.2
+    # penalizer
+    ortho_coeff = 0.1  # intrusion penalty
+    sparsity_coeff = 0.2 # sparsity regularization
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
     for data, targets in pbar:
         data, targets = data.to(device), targets.to(device).long()
         
-        # Reducimos un poco la ganancia para evitar saturación masiva
+        # reduce amplitude to avoid saturation
         spk_out, spk_hid = model(data * 3.0) 
         
-        # 1. Loss de Clasificación (CrossEntropy sobre la suma de los expertos)
+        # CrossEntropy to make sure experts learn how to clasifiy
         loss_cls = loss_fn(spk_out, targets)
 
-        # Suma total de spikes en el tiempo:[batch_size, 250]
+        # Add of all spikes
         total_spikes_hid = spk_hid.sum(dim=0) 
         
-        # Máscaras
+        # Masks for teh assignment of experts, each class has a group of 25 experts, the rest are intruders
         batch_masks = model.expert_masks[targets]
         intruder_masks = 1.0 - batch_masks
         
-        # 2. PENALIZACIÓN DE INTRUSOS (Ortogonalidad estricta)
-        # Castigamos cualquier spike que ocurra fuera del grupo experto asignado
+        # We penalize the itrusions of other experts
         intruder_spikes = total_spikes_hid * intruder_masks
         loss_ortho = ortho_coeff * intruder_spikes.mean()
 
-        # 3. REGULARIZACIÓN DE SPARSITY (Evitar saturación)
-        # Queremos que el experto correcto dispare, pero no al 100% (evitar los "50" fijos)
-        # Un buen target es ~15% de firing rate (aprox 7.5 spikes por neurona en 50 steps)
+        # Regularization, we want the exeperts to fire but not to sature the network
         expert_spikes = total_spikes_hid * batch_masks
         target_spikes_per_neuron = 7.5 
         avg_expert_spikes = expert_spikes.sum(dim=1) / model.neurons_per_class
         loss_sparsity = sparsity_coeff * torch.mean((avg_expert_spikes - target_spikes_per_neuron)**2)
         
-        # Loss Total
+        # Total loss
         loss_total = loss_cls + loss_ortho + loss_sparsity
         
         optimizer.zero_grad()
@@ -84,7 +81,7 @@ for epoch in range(num_epochs):
             'Spar': f"{loss_sparsity.item():.2f}"
         })
 
-    # --- VALIDACIÓN ---
+    # Vlaidation
     model.eval()
     correct, total, total_spikes, total_neurons_time = 0, 0, 0, 0
     with torch.no_grad():
@@ -92,7 +89,7 @@ for epoch in range(num_epochs):
             data, targets = data.to(device), targets.to(device)
             spk_out, spk_hid = model(data * 3.0)
             
-            # Predicción: ¿Qué grupo de expertos sumó más spikes en total?
+            # Predict: wich expert group has the most spikes?
             _, predicted = spk_out.sum(dim=0).max(1)
             total += targets.size(0)
             correct += (predicted == targets).sum().item()
@@ -104,7 +101,7 @@ for epoch in range(num_epochs):
     firing_rate = 100 * total_spikes / total_neurons_time
     print(f" -> Val Acc: {val_acc:.2f}% | Firing Rate: {firing_rate:.2f}%")
 
-# Guardado
+# Save
 class_experts = {i: list(range(i*model.neurons_per_class, (i+1)*model.neurons_per_class)) for i in range(10)}
 torch.save({
     'model_state': model.state_dict(),
@@ -112,4 +109,4 @@ torch.save({
     'neurons_per_class': model.neurons_per_class
 }, os.path.join(save_path, "snn_pop_audio_explainable.pth"))
 
-print("\nEntrenamiento finalizado. Modelo 100% explicable guardado.")
+print("\nEnding, saving...")

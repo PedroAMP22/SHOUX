@@ -1,2 +1,4 @@
 AudioMNIST_split
 __pycache__
+src/demos/siameseSNN/models
+db_cache.pt

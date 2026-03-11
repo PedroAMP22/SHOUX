@@ -1,5 +1,5 @@
 import os
-import time # <--- AÑADIDO PARA MEDIR EL TIEMPO
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -8,12 +8,9 @@ import torchaudio
 import pywt
 from tqdm import tqdm
 
-# Se asume que estos archivos existen en tu directorio
 from classes import SiameseSNN, AudioMNISTEvalDataset
 
-# ==========================================
-# 1. PARÁMETROS GLOBALES Y CONFIGURACIÓN
-# ==========================================
+# Config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DATA_ROOT = "AudioMNIST_split"
@@ -22,14 +19,11 @@ SIAMESE_SAVE_PATH = "./src/demos/siameseSNN/models/snn_siamese_model.pt"
 DB_CACHE_PATH = "db_cache.pt" 
 TARGET_LEN = 8000 
 
-print("Cargando modelo Wav2Vec 2.0 (Juez Imparcial)...")
 bundle = torchaudio.pipelines.WAV2VEC2_BASE
 gold_model = bundle.get_model().to(device)
 gold_model.eval()
 
-# ==========================================
-# 2. FUNCIONES DE EXTRACCIÓN Y PROCESAMIENTO
-# ==========================================
+# Metrics functions
 def extract_gold_standard(waveform, sample_rate=8000):
     with torch.no_grad():
         resampler = torchaudio.transforms.Resample(sample_rate, 16000).to(device)
@@ -77,18 +71,16 @@ def extract_dwt(waveform, wavelet='db4', level=4):
     features = np.array(features)
     return torch.tensor(features / (np.linalg.norm(features) + 1e-9), dtype=torch.float32)
 
-# ==========================================
-# 3. CONSTRUCTOR DE LA BASE DE DATOS
-# ==========================================
+# Database construction (with caching)
 def get_or_build_database(model, dataloader, device):
     if os.path.exists(DB_CACHE_PATH):
-        print(f"Cargando base de datos desde caché: {DB_CACHE_PATH}")
+        print(f"Loading database from cache: {DB_CACHE_PATH}")
         return torch.load(DB_CACHE_PATH, weights_only=False)
         
     db = {'snn':[], 'spikes':[], 'mfcc':[], 'dwt':[], 'raw_c': [], 
           'gold_vector':[], 'labels':[], 'filenames':[]}
     
-    print("Construyendo Base de Datos con Gold Standard (Esto tomará un rato)...")
+    print("Building database from model embeddings and features...")
     model.eval()
     with torch.no_grad():
         for waveforms, labels, filenames in tqdm(dataloader):
@@ -118,18 +110,14 @@ def get_or_build_database(model, dataloader, device):
     db['labels'] = torch.tensor(db['labels'])
     db['filenames'] = np.array(db['filenames'])
     
-    print(f"Guardando base de datos en caché: {DB_CACHE_PATH}")
     torch.save(db, DB_CACHE_PATH)
     return db
 
-# ==========================================
-# 4. BENCHMARK: CALIDAD LATENTE xAI Y TIEMPOS
-# ==========================================
+# Benchmark
 def run_latent_quality_benchmark(db, k=5):
     methods =["SNN Siamese", "Van Rossum", "MFCC", "DWT", "Pearson"]
     results = {m: {'recall': [], 'factual_rmse': [], 'cf_rmse':[], 'time':[]} for m in methods}
     
-    print(f"\nIniciando Benchmark de Calidad Latente xAI y Tiempos (N={len(db['filenames'])})")
     
     for i in tqdm(range(len(db['filenames']))):
         q_label = db['labels'][i].item()
@@ -143,9 +131,8 @@ def run_latent_quality_benchmark(db, k=5):
         mask_same_label = (db_labels_self == q_label)
         mask_diff_label = ~mask_same_label
 
-        # 3. EVALUACIÓN DE MÉTODOS ESTÁNDAR (CON CRONÓMETRO)
+        # Methos Eval
         for m in ["SNN Siamese", "MFCC", "DWT", "Pearson"]:
-            # --- INICIO CRONÓMETRO ---
             t0 = time.perf_counter()
             
             if m == "SNN Siamese":
@@ -159,29 +146,28 @@ def run_latent_quality_benchmark(db, k=5):
             
             topk_all = torch.topk(dists, k, largest=False)[1]
             
-            # --- FIN CRONÓMETRO ---
             t1 = time.perf_counter()
-            results[m]['time'].append((t1 - t0) * 1000) # Guardar en milisegundos
+            results[m]['time'].append((t1 - t0) * 1000) 
             
-            # Métrica: Recall
+            # Recall
             results[m]['recall'].append((db_labels_self[topk_all] == q_label).float().mean().item())
             
-            # Métrica: Factual RMSE 
+            # Factual RMSE 
             dists_f = dists[mask_same_label]
             if len(dists_f) > 0:
                 topk_f = torch.topk(dists_f, min(k, len(dists_f)), largest=False)[1]
                 rmse_f = torch.sqrt(torch.mean((q_gold - db_gold_self[mask_same_label][topk_f])**2, dim=1)).mean().item()
                 results[m]['factual_rmse'].append(rmse_f)
             
-            # Métrica: Contrafactual RMSE 
+            # Contrafactual RMSE 
             dists_cf = dists[mask_diff_label]
             if len(dists_cf) > 0:
                 top1_cf = torch.topk(dists_cf, 1, largest=False)[1]
                 rmse_cf = torch.sqrt(torch.mean((q_gold - db_gold_self[mask_diff_label][top1_cf])**2, dim=1)).mean().item()
                 results[m]['cf_rmse'].append(rmse_cf)
 
-        # 4. EVALUACIÓN VAN ROSSUM (CON CRONÓMETRO)
-        # --- INICIO CRONÓMETRO VR ---
+        # Van Rossum
+        # Chrono start
         t0_vr = time.perf_counter()
         
         q_spk = db['spikes'][i]
@@ -191,14 +177,14 @@ def run_latent_quality_benchmark(db, k=5):
         vr_dists = torch.tensor([van_rossum_distance(q_spk, db['spikes'][mask_self][idx]) for idx in top20_snn])
         vr_topk_all = top20_snn[torch.topk(vr_dists, min(k, len(vr_dists)), largest=False)[1]]
         
-        # --- FIN CRONÓMETRO VR ---
+        # Chrono end
         t1_vr = time.perf_counter()
         results["Van Rossum"]['time'].append((t1_vr - t0_vr) * 1000)
         
-        # Recall VR
+        # Recall RMSE
         results["Van Rossum"]['recall'].append((db_labels_self[vr_topk_all] == q_label).float().mean().item())
         
-        # Factual VR
+        # Factual RMSE
         mask_vr_f = (db_labels_self[top20_snn] == q_label)
         if mask_vr_f.any():
             vr_dists_f = vr_dists[mask_vr_f]
@@ -206,7 +192,7 @@ def run_latent_quality_benchmark(db, k=5):
             vr_topk_f = vr_idxs_f[torch.topk(vr_dists_f, min(k, len(vr_dists_f)), largest=False)[1]]
             results["Van Rossum"]['factual_rmse'].append(torch.sqrt(torch.mean((q_gold - db_gold_self[vr_topk_f])**2, dim=1)).mean().item())
         
-        # Contrafactual VR
+        # Contrafactual RMSE
         mask_vr_cf = ~mask_vr_f
         if mask_vr_cf.any():
             vr_dists_cf = vr_dists[mask_vr_cf]
@@ -214,9 +200,9 @@ def run_latent_quality_benchmark(db, k=5):
             vr_top1_cf = vr_idxs_cf[torch.argmin(vr_dists_cf)]
             results["Van Rossum"]['cf_rmse'].append(torch.sqrt(torch.mean((q_gold - db_gold_self[vr_top1_cf].unsqueeze(0))**2, dim=1)).mean().item())
 
-    # 5. REPORTE FINAL
+    # Final report
     print(f"\n{'='*120}")
-    print(f"{'MÉTODO':<15} | {'TIEMPO/Q (ms)':<15} | {'RECALL @5':<12} | {'FACTUAL RMSE (↓)':<18} | {'CF RMSE (Enemy) (↑)':<20} | {'MARGEN xAI (↑)'}")
+    print(f"{'Method':<15} | {'TIME/Q (ms)':<15} | {'RECALL @5':<12} | {'FACTUAL RMSE (lower better)':<18} | {'CF RMSE (higher better)':<20} | {'MARGIN xAI (higher better)'}")
     print(f"{'='*120}")
     for m in methods:
         rec = np.mean(results[m]['recall']) * 100
@@ -229,15 +215,11 @@ def run_latent_quality_benchmark(db, k=5):
         
         print(f"{m:<15} | {time_str:<15} | {rec:>10.2f}% | {f_rmse:>18.6f} | {cf_rmse:>20.6f} | {margen:>15.6f}")
     print(f"{'='*120}")
-    print("* Nota: El tiempo de Van Rossum incluye un pre-filtrado sobre el top-20 para hacerlo viable.")
-    print("        Si se aplicara sobre la BD completa, el tiempo sería órdenes de magnitud superior.")
+    print("* Note: The time of Van Rossum includes a pre-filtering over the top-20 to make it viable.")
+    print("        If applied to the complete DB, the time would be orders of magnitude higher.")
 
-# ==========================================
-# 5. EJECUCIÓN PRINCIPAL
-# ==========================================
-
+# main execution
 if __name__ == "__main__":
-    print("Cargando Siamese SNN...")
     model = SiameseSNN(BACKBONE_PATH).to(device)
     ckpt = torch.load(SIAMESE_SAVE_PATH, map_location=device)
     model.load_state_dict(ckpt['model_state'] if 'model_state' in ckpt else ckpt)

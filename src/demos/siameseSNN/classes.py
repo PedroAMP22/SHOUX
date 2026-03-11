@@ -14,56 +14,65 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SiameseSNN(nn.Module):
     def __init__(self, backbone_path):
         super().__init__()
+        # BackBone loaded and frozen
         checkpoint = torch.load(backbone_path, map_location=device)
         state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
-        
         num_neurons_hid = state_dict['fc1.weight'].shape[0]
         
         self.backbone = PopNetAudio(num_neurons_hid=num_neurons_hid, num_classes=10).to(device)
-        
         self.backbone.load_state_dict(state_dict, strict=True)
             
         for param in self.backbone.parameters():
             param.requires_grad = False
-            
         self.backbone.eval()
+
+        # Temporal fitler, to capture the temporal dynamics of the spikes (Van Rossum-inspired)
+        self.temporal_filter = nn.Conv1d(
+            in_channels=num_neurons_hid, 
+            out_channels=num_neurons_hid, 
+            kernel_size=7,
+            padding=3, 
+            groups=num_neurons_hid 
+        ).to(device)
         
-        input_dim = self.backbone.num_neurons_hid * 2 
-        self.fc_siamese = nn.Linear(input_dim, 128).to(device)
+        # Reduce temp dmension, inspired by the idea of capturing "phases" of the audio (start, middle, end)
+        self.pool = nn.AdaptiveAvgPool1d(4)
+
+        # Input dim for the linear layer after pooling: num_neurons_hid * 4 (phases)
+        input_dim = num_neurons_hid * 4 
+        
+        self.fc_siamese = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        ).to(device)
     
     def get_embedding(self, x):
         self.backbone.eval()
         
-        # spk_hid_rec es [num_steps, batch, num_neurons_hid]
+        # spk_hid_rec ~ [steps, batch, neurons]
         _, spk_hid_rec = self.backbone(x) 
         
-        # 1. Tasa de disparo (lo que ya tenías)
-        firing_rate = spk_hid_rec.sum(dim=0) # [batch, 250]
+        # Change to [batch, neurons, steps] for Conv1D
+        x_temp = spk_hid_rec.permute(1, 2, 0) 
         
-        # 2. Latencia (Time-to-First-Spike)
-        # Buscamos el índice del primer paso donde ocurre un spike
-        # Si no hay spikes, ponemos num_steps (latencia máxima)
-        first_spike_idx = torch.argmax(spk_hid_rec, dim=0).float()
-        # Normalizamos entre 0 y 1
-        latency = first_spike_idx / num_steps 
+        # Apply the filter (van Rossum-inspired) + ReLU
+        x_temp = F.relu(self.temporal_filter(x_temp))
         
-        # 3. Combinamos: [batch, 250 + 250] = [batch, 500]
-        # Ahora el embedding tiene información de frecuencia Y de tiempo
-        combined_features = torch.cat([firing_rate, latency], dim=1)
+        # Temporal pooling, we capture how the spikes evolve over time in 4 "phases"
+        x_temp = self.pool(x_temp) # [batch, 250, 4]
         
-        # Proyección (Asegúrate de que fc_siamese acepte 500 entradas)
+        # Lineal lyer
+        combined_features = x_temp.view(x_temp.size(0), -1) # [batch, 1000]
+        
+        # Embedding projection
         out = self.fc_siamese(combined_features)
         
         embedding = F.normalize(out, p=2, dim=1)
         
-        return embedding, spk_hid_rec.sum(dim=0) # Mantenemos la compatibilidad
+        return embedding, spk_hid_rec.sum(dim=0)
 
     def forward(self, x1, x2):
-        emb1, _ = self.get_embedding(x1)
-        emb2, _ = self.get_embedding(x2)
-        return emb1, emb2
-
-    def forward_full(self, x1, x2):
         emb1, spk_hid1 = self.get_embedding(x1)
         emb2, spk_hid2 = self.get_embedding(x2)
         return emb1, emb2, spk_hid1, spk_hid2
@@ -134,7 +143,6 @@ class AudioMNISTEvalDataset(Dataset):
         path, label, filename = self.file_list[idx]
         waveform, sr = torchaudio.load(path, backend="soundfile")
         
-        # Normalización biológica
         waveform = waveform - waveform.mean()
         waveform = waveform / (waveform.abs().max() + 1e-8)
 
@@ -161,7 +169,7 @@ class PopNetAudio(nn.Module):
         self.num_neurons_hid = num_neurons_hid
         self.neurons_per_class = num_neurons_hid // num_classes
         
-        # Extractor de características
+        # Characteristic convolutional layers to extract features from the raw audio
         self.conv_block = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=80, stride=4),
             nn.BatchNorm1d(16),
@@ -171,17 +179,16 @@ class PopNetAudio(nn.Module):
             nn.BatchNorm1d(32),
             snn.Leaky(beta=beta, threshold=v_threshold, spike_grad=spike_grad, init_hidden=True),
             nn.Flatten()
-        ) # -> Lo transforma a Spikes
+        )
 
 
 
         self.dropout = nn.Dropout(0.4)
-        # los Expertos
-        # idealmente, si hay 250 neuronas, 25 neuronas por clase
+        # Experts layer, 250 in total, 25 per class
         self.fc1 = nn.Linear(15776, num_neurons_hid)
         self.lif_hid = snn.Leaky(beta=beta, threshold=v_threshold, spike_grad=spike_grad, init_hidden=True, output=True)
         
-        # Máscaras para la función de pérdida
+        # mask for loss function, to ensure that only the spikes of the expert neurons of the correct class contribute to the loss
         masks = torch.zeros(num_classes, num_neurons_hid)
         for i in range(num_classes):
             masks[i, i*self.neurons_per_class : (i+1)*self.neurons_per_class] = 1.0
@@ -195,21 +202,18 @@ class PopNetAudio(nn.Module):
             x_feat = self.conv_block(x)
             x_feat = self.dropout(x_feat)
             
-            # Capa de expertos
+            # experts
             cur_hid = self.fc1(x_feat)
             spk_hid, _ = self.lif_hid(cur_hid)
             spk_hid_rec.append(spk_hid)
             
-        # Apilamos los spikes: [num_steps, batch_size, num_neurons_hid]
+        # [num_steps, batch_size, num_neurons_hid]
         spk_hid_rec = torch.stack(spk_hid_rec)
         
-        # --- EXPLICABILIDAD POR DISEÑO (Direct Pooling) ---
-        # Redimensionamos para agrupar las neuronas por clase: 
-        #[num_steps, batch_size, num_classes, neurons_per_class]
+        # xAi in architecture - we group the spikes of the hidden layer into 10 groups of 25 neurons (each group is an "expert" for a class)
         spk_grouped = spk_hid_rec.view(num_steps, x.size(0), self.num_classes, self.neurons_per_class)
         
-        # Sumamos los spikes de las 25 neuronas de cada experto para obtener la "energía" de la clase
-        # Resultado: [num_steps, batch_size, num_classes]
+        # We sum the spikes of each group to get the output spikes for each class, this is what will be used for the loss and the embeddings
         spk_out_rec = spk_grouped.sum(dim=3) 
         
         return spk_out_rec, spk_hid_rec
