@@ -54,6 +54,4 @@ def procesar_expertos(archivo_entrada, archivo_salida):
     print(f"Precisión del Experto vs Real: {df['EXP_VS_REAL'].mean()*100:.2f}%")
     print(f"Coherencia Experto vs Predicción: {df['EXP_VS_PRED'].mean()*100:.2f}%")
 
-# Ejecutar la función
-# Asegúrate de que 'datos.txt' sea el nombre de tu archivo
 procesar_expertos('src/demos/siameseSNN/results/biological_pathway_results.txt', 'analisis_final_expertos.xlsx')

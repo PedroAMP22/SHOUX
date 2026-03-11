@@ -149,7 +149,7 @@ class AudioMNISTEvalDataset(Dataset):
 
 
 beta = 0.9
-v_threshold = 1.0
+v_threshold = 1.5
 num_steps = 50
 spike_grad = snn.surrogate.fast_sigmoid(slope=15) 
 
