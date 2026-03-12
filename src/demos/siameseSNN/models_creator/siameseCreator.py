@@ -65,7 +65,7 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), SIAMESE_SAVE_PATH)
         print(f"Save {SIAMESE_SAVE_PATH}")
 
-    # --- B. EVALUACIÓN ---
+    # Eval
     print("\nEval...")
     model.eval()
     

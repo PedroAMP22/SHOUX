@@ -30,21 +30,26 @@ class SiameseSNN(nn.Module):
         self.temporal_filter = nn.Conv1d(
             in_channels=num_neurons_hid, 
             out_channels=num_neurons_hid, 
-            kernel_size=7,
-            padding=3, 
+            kernel_size=15,
+            padding=7, 
             groups=num_neurons_hid 
         ).to(device)
         
         # Reduce temp dmension, inspired by the idea of capturing "phases" of the audio (start, middle, end)
-        self.pool = nn.AdaptiveAvgPool1d(4)
+        self.pool = nn.AdaptiveAvgPool1d(8)
 
-        # Input dim for the linear layer after pooling: num_neurons_hid * 4 (phases)
-        input_dim = num_neurons_hid * 4 
+        # Input dim for the linear layer after pooling: num_neurons_hid * 8 (phases)
+        input_dim = num_neurons_hid * 8 
         
+        # turn to embedding of 128 dimensions, this is the final representation of the audio that will be used for the contrastive loss
         self.fc_siamese = nn.Sequential(
-            nn.Linear(input_dim, 256),
+            nn.Linear(input_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Linear(256, 128)
+            nn.Dropout(0.2),     
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128) 
         ).to(device)
     
     def get_embedding(self, x):
@@ -56,8 +61,8 @@ class SiameseSNN(nn.Module):
         # Change to [batch, neurons, steps] for Conv1D
         x_temp = spk_hid_rec.permute(1, 2, 0) 
         
-        # Apply the filter (van Rossum-inspired) + ReLU
-        x_temp = F.relu(self.temporal_filter(x_temp))
+        # Apply the filter (van Rossum-inspired) + leaky-relu
+        x_temp = F.leaky_relu(self.temporal_filter(x_temp))
         
         # Temporal pooling, we capture how the spikes evolve over time in 4 "phases"
         x_temp = self.pool(x_temp) # [batch, 250, 4]
