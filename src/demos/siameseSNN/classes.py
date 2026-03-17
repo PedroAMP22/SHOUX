@@ -14,73 +14,59 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SiameseSNN(nn.Module):
     def __init__(self, backbone_path):
         super().__init__()
-        # BackBone loaded and frozen
+        # Backbone
         checkpoint = torch.load(backbone_path, map_location=device)
         state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
         num_neurons_hid = state_dict['fc1.weight'].shape[0]
         
         self.backbone = PopNetAudio(num_neurons_hid=num_neurons_hid, num_classes=10).to(device)
         self.backbone.load_state_dict(state_dict, strict=True)
-            
         for param in self.backbone.parameters():
             param.requires_grad = False
         self.backbone.eval()
 
-        # Temporal fitler, to capture the temporal dynamics of the spikes (Van Rossum-inspired)
+        # high temp filter
         self.temporal_filter = nn.Conv1d(
             in_channels=num_neurons_hid, 
             out_channels=num_neurons_hid, 
-            kernel_size=15,
-            padding=7, 
+            kernel_size=25,
+            padding=12, 
             groups=num_neurons_hid 
         ).to(device)
         
-        # Reduce temp dmension, inspired by the idea of capturing "phases" of the audio (start, middle, end)
-        self.pool = nn.AdaptiveAvgPool1d(8)
+        # Big pooling to capture fine temporal details for better RMSE, we will learn this pooling layer to adapt to the data
+        self.pool = nn.AdaptiveAvgPool1d(16) 
 
-        # Input dim for the linear layer after pooling: num_neurons_hid * 8 (phases)
-        input_dim = num_neurons_hid * 8 
+        # 250 n * 16 bins = 4000
+        input_dim = num_neurons_hid * 16 
         
-        # turn to embedding of 128 dimensions, this is the final representation of the audio that will be used for the contrastive loss
         self.fc_siamese = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),     
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128) 
+            nn.Linear(input_dim, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
+            nn.Linear(1024, 512)
         ).to(device)
     
     def get_embedding(self, x):
         self.backbone.eval()
+        with torch.no_grad():
+            _, spk_hid_rec = self.backbone(x) 
         
-        # spk_hid_rec ~ [steps, batch, neurons]
-        _, spk_hid_rec = self.backbone(x) 
-        
-        # Change to [batch, neurons, steps] for Conv1D
         x_temp = spk_hid_rec.permute(1, 2, 0) 
-        
-        # Apply the filter (van Rossum-inspired) + leaky-relu
         x_temp = F.leaky_relu(self.temporal_filter(x_temp))
+        x_temp = self.pool(x_temp) 
         
-        # Temporal pooling, we capture how the spikes evolve over time in 4 "phases"
-        x_temp = self.pool(x_temp) # [batch, 250, 4]
-        
-        # Lineal lyer
-        combined_features = x_temp.view(x_temp.size(0), -1) # [batch, 1000]
-        
-        # Embedding projection
+        combined_features = x_temp.reshape(x_temp.size(0), -1) 
         out = self.fc_siamese(combined_features)
         
         embedding = F.normalize(out, p=2, dim=1)
-        
         return embedding, spk_hid_rec.sum(dim=0)
 
     def forward(self, x1, x2):
-        emb1, spk_hid1 = self.get_embedding(x1)
-        emb2, spk_hid2 = self.get_embedding(x2)
-        return emb1, emb2, spk_hid1, spk_hid2
+        emb1, spk1 = self.get_embedding(x1)
+        emb2, spk2 = self.get_embedding(x2)
+        return emb1, emb2, spk1, spk2
 
 # dataset for siamese
 class SiameseAudioMNIST(Dataset):
