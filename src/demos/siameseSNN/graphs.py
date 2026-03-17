@@ -2,7 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import re
 
-FILE_NAME = "resultados.txt" 
+FILE_NAME = "src/demos/siameseSNN/results/output_final.txt" 
+
 
 def parse_txt_data(filename):
     data = {1: {}, 3: {}, 5: {}}

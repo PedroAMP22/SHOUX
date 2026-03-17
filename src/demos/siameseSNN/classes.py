@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import snntorch as snn
-from snntorch import surrogate, utils
+from snntorch import utils
 import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import Dataset
@@ -14,7 +14,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class SiameseSNN(nn.Module):
     def __init__(self, backbone_path):
         super().__init__()
-        # Backbone
         checkpoint = torch.load(backbone_path, map_location=device)
         state_dict = checkpoint['model_state'] if 'model_state' in checkpoint else checkpoint
         num_neurons_hid = state_dict['fc1.weight'].shape[0]
@@ -25,7 +24,7 @@ class SiameseSNN(nn.Module):
             param.requires_grad = False
         self.backbone.eval()
 
-        # high temp filter
+        # Filtro temporal de alta resolución
         self.temporal_filter = nn.Conv1d(
             in_channels=num_neurons_hid, 
             out_channels=num_neurons_hid, 
@@ -34,18 +33,21 @@ class SiameseSNN(nn.Module):
             groups=num_neurons_hid 
         ).to(device)
         
-        # Big pooling to capture fine temporal details for better RMSE, we will learn this pooling layer to adapt to the data
-        self.pool = nn.AdaptiveAvgPool1d(16) 
+        # POOLING HÍBRIDO: Captura la suavidad (RMSE) y los picos (Diversidad)
+        self.avg_pool = nn.AdaptiveAvgPool1d(16)
+        self.max_pool = nn.AdaptiveMaxPool1d(16)
 
-        # 250 n * 16 bins = 4000
-        input_dim = num_neurons_hid * 16 
+        # 250 n * (16 avg + 16 max) = 8000 entradas
+        input_dim = num_neurons_hid * 32 
         
         self.fc_siamese = nn.Sequential(
             nn.Linear(input_dim, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
-            nn.Linear(1024, 512)
+            nn.Linear(1024, 1024), # Capa extra para procesar la alta resolución
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512)   # Embedding de 512 para máxima fidelidad
         ).to(device)
     
     def get_embedding(self, x):
@@ -55,11 +57,13 @@ class SiameseSNN(nn.Module):
         
         x_temp = spk_hid_rec.permute(1, 2, 0) 
         x_temp = F.leaky_relu(self.temporal_filter(x_temp))
-        x_temp = self.pool(x_temp) 
         
-        combined_features = x_temp.reshape(x_temp.size(0), -1) 
+        # Combinamos ambos poolings
+        x_avg = self.avg_pool(x_temp)
+        x_max = self.max_pool(x_temp)
+        combined_features = torch.cat([x_avg, x_max], dim=1).reshape(x_temp.size(0), -1)
+        
         out = self.fc_siamese(combined_features)
-        
         embedding = F.normalize(out, p=2, dim=1)
         return embedding, spk_hid_rec.sum(dim=0)
 
