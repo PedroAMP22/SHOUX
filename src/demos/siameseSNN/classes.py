@@ -24,7 +24,6 @@ class SiameseSNN(nn.Module):
             param.requires_grad = False
         self.backbone.eval()
 
-        # Filtro temporal de alta resolución
         self.temporal_filter = nn.Conv1d(
             in_channels=num_neurons_hid, 
             out_channels=num_neurons_hid, 
@@ -33,21 +32,19 @@ class SiameseSNN(nn.Module):
             groups=num_neurons_hid 
         ).to(device)
         
-        # POOLING HÍBRIDO: Captura la suavidad (RMSE) y los picos (Diversidad)
         self.avg_pool = nn.AdaptiveAvgPool1d(16)
         self.max_pool = nn.AdaptiveMaxPool1d(16)
 
-        # 250 n * (16 avg + 16 max) = 8000 entradas
         input_dim = num_neurons_hid * 32 
         
         self.fc_siamese = nn.Sequential(
             nn.Linear(input_dim, 1024),
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.1),
-            nn.Linear(1024, 1024), # Capa extra para procesar la alta resolución
+            nn.Linear(1024, 1024),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.1),
-            nn.Linear(1024, 512)   # Embedding de 512 para máxima fidelidad
+            nn.Linear(1024, 512) 
         ).to(device)
     
     def get_embedding(self, x):
@@ -58,7 +55,6 @@ class SiameseSNN(nn.Module):
         x_temp = spk_hid_rec.permute(1, 2, 0) 
         x_temp = F.leaky_relu(self.temporal_filter(x_temp))
         
-        # Combinamos ambos poolings
         x_avg = self.avg_pool(x_temp)
         x_max = self.max_pool(x_temp)
         combined_features = torch.cat([x_avg, x_max], dim=1).reshape(x_temp.size(0), -1)

@@ -101,10 +101,13 @@ def get_or_build_database(model, dataloader, device):
 def run_advanced_xai_benchmark(db, k_values=[1, 3, 5]):
     methods =["SNN Siamese", "Van Rossum", "MFCC", "DWT", "Pearson"]
     
-    results = {k: {m: {'f_rmse':[], 'cf_rmse': [], 'f_diversity': [], 'cf_diversity':[], 'time':[]} for m in methods} for k in k_values}
+    results = {k: {m: {'f_rmse':[], 'cf_rmse':[], 'f_diversity': [], 'cf_diversity':[], 'time':[]} for m in methods} for k in k_values}
     
+    print(f"\n" + "="*100)
+    print(f" K={k_values}")
+    print("="*100)
 
-    for i in tqdm(range(len(db['filenames'])), desc="Processing Queries"):
+    for i in tqdm(range(len(db['filenames'])), desc="Proces Audios"):
         q_label = db['labels'][i].item()
         q_fname = db['filenames'][i]
         q_gold = db['gold_vector'][i].unsqueeze(0)
@@ -117,6 +120,7 @@ def run_advanced_xai_benchmark(db, k_values=[1, 3, 5]):
         for m in methods:
             t0 = time.perf_counter()
             
+            # Globa dist
             if m == "SNN Siamese":
                 dists = torch.cdist(db['snn'][i:i+1], db['snn'][mask_self], p=2).squeeze(0)
             elif m == "MFCC":
@@ -138,44 +142,60 @@ def run_advanced_xai_benchmark(db, k_values=[1, 3, 5]):
             for k in k_values:
                 results[k][m]['time'].append(calc_time)
                 
-                factual_rmse_val = 0
-                factual_diversity_val = 0
-                cf_rmses_list = []
-                cf_gold_vectors =[]
 
+                # Factual
+                mask_factual = (db_labels_f == q_label)
+                dists_f = dists[mask_factual]
+                
+                if len(dists_f) > 0:
+                    actual_k_f = min(k, len(dists_f))
+                    topk_f_idx = torch.topk(dists_f, actual_k_f, largest=False)[1]
+                    neighbors_gold_f = db_gold_f[mask_factual][topk_f_idx]
+                    
+                    f_rmse = torch.sqrt(torch.mean((q_gold - neighbors_gold_f)**2, dim=1)).mean().item()
+                    f_div = torch.pdist(neighbors_gold_f, p=2).mean().item() if len(neighbors_gold_f) > 1 else 0.0
+                else:
+                    f_rmse, f_div = 0.0, 0.0
+                
+                results[k][m]['f_rmse'].append(f_rmse)
+                results[k][m]['f_diversity'].append(f_div)
+
+                # CF
+                best_enemies =[]
                 for class_id in range(10):
+                    if class_id == q_label: continue
+                    
                     mask_class = (db_labels_f == class_id)
                     if not mask_class.any(): continue
                     
                     dists_class = dists[mask_class]
-                    actual_k = min(k, len(dists_class))
-                    topk_class_idx = torch.topk(dists_class, actual_k, largest=False)[1]
                     
-                    neighbors_gold = db_gold_f[mask_class][topk_class_idx]
-                    rmse = torch.sqrt(torch.mean((q_gold - neighbors_gold)**2, dim=1)).mean().item()
+                    if m == "Van Rossum" and torch.isinf(dists_class).all():
+                        dists_class = d_base[mask_class]
+                        
+                    min_idx = torch.argmin(dists_class)
+                    min_dist_val = dists_class[min_idx].item()
+                    enemy_gold = db_gold_f[mask_class][min_idx]
                     
-                    if class_id == q_label:
-                        factual_rmse_val = rmse
-                        if len(neighbors_gold) > 1:
-                            factual_diversity_val = torch.pdist(neighbors_gold, p=2).mean().item()
-                        else:
-                            factual_diversity_val = 0.0
-                    else:
-                        cf_rmses_list.append(rmse)
-                        top1_enemy_gold = db_gold_f[mask_class][torch.argmin(dists_class)].unsqueeze(0)
-                        cf_gold_vectors.append(top1_enemy_gold)
+                    best_enemies.append((min_dist_val, enemy_gold))
                 
-                results[k][m]['f_rmse'].append(factual_rmse_val)
-                results[k][m]['f_diversity'].append(factual_diversity_val)
-                results[k][m]['cf_rmse'].append(np.mean(cf_rmses_list))
+                best_enemies.sort(key=lambda x: x[0])
                 
-                if len(cf_gold_vectors) > 1:
-                    cf_tensor = torch.cat(cf_gold_vectors, dim=0)
-                    diversity = torch.pdist(cf_tensor, p=2).mean().item()
-                    results[k][m]['cf_diversity'].append(diversity)
+                actual_k_cf = min(k, len(best_enemies))
+                topk_enemies = best_enemies[:actual_k_cf]
+                
+                if len(topk_enemies) > 0:
+                    cf_gold_vectors = torch.stack([e[1] for e in topk_enemies])
+                    cf_rmse = torch.sqrt(torch.mean((q_gold - cf_gold_vectors)**2, dim=1)).mean().item()
+                    cf_div = torch.pdist(cf_gold_vectors, p=2).mean().item() if len(cf_gold_vectors) > 1 else 0.0
+                else:
+                    cf_rmse, cf_div = 0.0, 0.0
+                    
+                results[k][m]['cf_rmse'].append(cf_rmse)
+                results[k][m]['cf_diversity'].append(cf_div)
 
     for k in k_values:
-        print(f"\nResults K={k}:")
+        print(f"\nK={k}:")
         print(f"{'Method':<15} | {'T/Q(ms)':<8} | {'F.RMSE':<10} | {'CF.RMSE':<10} | {'F.Div':<9} | {'CF.Div':<9}")
         print("-" * 90)
         for m in methods:
