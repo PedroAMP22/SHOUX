@@ -129,13 +129,14 @@ def run_advanced_xai_benchmark(db, k_values=[1, 3, 5]):
                 dists = torch.cdist(db['dwt'][i:i+1], db['dwt'][mask_self], p=2).squeeze(0)
             elif m == "Pearson":
                 dists = 1 - F.cosine_similarity(db['raw_c'][i:i+1].to(device), db['raw_c'][mask_self].to(device)).cpu()
+            
             elif m == "Van Rossum":
                 d_base = torch.cdist(db['snn'][i:i+1], db['snn'][mask_self], p=2).squeeze(0)
                 top50_idx = torch.topk(d_base, 50, largest=False)[1]
                 vr_dists_local = torch.tensor([van_rossum_distance(q_spk, db['spikes'][mask_self][idx]) for idx in top50_idx])
                 dists = torch.full_like(d_base, float('inf'))
                 dists[top50_idx] = vr_dists_local
-
+            
             t1 = time.perf_counter()
             calc_time = (t1 - t0) * 1000 
 
@@ -172,7 +173,7 @@ def run_advanced_xai_benchmark(db, k_values=[1, 3, 5]):
                     
                     if m == "Van Rossum" and torch.isinf(dists_class).all():
                         dists_class = d_base[mask_class]
-                        
+                    
                     min_idx = torch.argmin(dists_class)
                     min_dist_val = dists_class[min_idx].item()
                     enemy_gold = db_gold_f[mask_class][min_idx]
