@@ -43,7 +43,7 @@ class SiameseSNN(nn.Module):
             nn.LeakyReLU(0.1),
             nn.Linear(1024, 1024),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
             nn.Linear(1024, 512) 
         ).to(device)
     
@@ -74,8 +74,10 @@ class SiameseAudioMNIST(Dataset):
         self.split_dir = split_dir
         self.sample_rate = sample_rate
         self.num_samples = int(sample_rate * duration)
-        self.file_list = []
-        self.label_to_indices = {i: [] for i in range(10)}
+        self.file_list =[]
+        
+        self.digit_to_indices = {i:[] for i in range(10)}
+        self.digit_speaker_to_indices = {}
         
         current_idx = 0
         for label_dir in sorted(os.listdir(split_dir)):
@@ -83,14 +85,24 @@ class SiameseAudioMNIST(Dataset):
             if os.path.isdir(label_path):
                 for file in os.listdir(label_path):
                     if file.endswith(".wav"):
-                        self.file_list.append((os.path.join(label_path, file), int(label_dir), file))
-                        self.label_to_indices[int(label_dir)].append(current_idx)
-                        current_idx += 1
+                        parts = file.split('_')
+                        if len(parts) >= 2:
+                            digit = int(parts[0])
+                            speaker = parts[1]
+                            
+                            self.file_list.append((os.path.join(label_path, file), digit, speaker))
+                            self.digit_to_indices[digit].append(current_idx)
+                            
+                            if (digit, speaker) not in self.digit_speaker_to_indices:
+                                self.digit_speaker_to_indices[(digit, speaker)] = []
+                            self.digit_speaker_to_indices[(digit, speaker)].append(current_idx)
+                            
+                            current_idx += 1
 
     def __len__(self): return len(self.file_list)
 
     def _get_audio(self, idx):
-        path, label, _ = self.file_list[idx]
+        path, digit, speaker = self.file_list[idx]
         waveform, sr = torchaudio.load(path, backend="soundfile")
         waveform = waveform - waveform.mean()
         waveform = waveform / (waveform.abs().max() + 1e-8)
@@ -100,19 +112,37 @@ class SiameseAudioMNIST(Dataset):
             waveform = waveform[:, :self.num_samples]
         else:
             waveform = torch.nn.functional.pad(waveform, (0, self.num_samples - waveform.size(1)))
-        return waveform, label
+        return waveform, digit, speaker
 
     def __getitem__(self, idx):
-        x1, label1 = self._get_audio(idx)
-        is_same = random.randint(0, 1)
-        if is_same:
-            idx2 = random.choice(self.label_to_indices[label1])
-            x2, _ = self._get_audio(idx2)
+        wave1, digit1, speaker1 = self._get_audio(idx)
+        
+        # Elegimos aleatoriamente qué tipo de pareja formar (0, 1 o 2)
+        pair_type = random.choice([0, 1, 2])
+        
+        if pair_type == 0:
+            # 1. Mismo dígito, mismo locutor
+            idx2 = random.choice(self.digit_speaker_to_indices[(digit1, speaker1)])
+        elif pair_type == 1:
+            # 2. Mismo dígito, DISTINTO locutor
+            possible_indices = [i for i in self.digit_to_indices[digit1] if self.file_list[i][2] != speaker1]
+            if not possible_indices: # Por si acaso es el único locutor en este split
+                idx2 = random.choice(self.digit_to_indices[digit1])
+            else:
+                idx2 = random.choice(possible_indices)
         else:
-            label2 = random.choice([l for l in range(10) if l != label1])
-            idx2 = random.choice(self.label_to_indices[label2])
-            x2, _ = self._get_audio(idx2)
-        return x1, x2, torch.tensor(is_same, dtype=torch.float32)
+            # 3. Distinto dígito
+            digit2 = random.choice([d for d in range(10) if d != digit1])
+            idx2 = random.choice(self.digit_to_indices[digit2])
+            
+        wave2, digit2, speaker2 = self._get_audio(idx2)
+        
+        same_digit = 1.0 if digit1 == digit2 else 0.0
+        same_speaker = 1.0 if speaker1 == speaker2 else 0.0
+        
+        return wave1, wave2, torch.tensor(same_digit, dtype=torch.float32), torch.tensor(same_speaker, dtype=torch.float32)
+
+        
      
  
 class AudioMNISTEvalDataset(Dataset):
