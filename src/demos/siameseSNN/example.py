@@ -131,56 +131,6 @@ ax3.set_xlabel('Time (Samples)')
 plt.tight_layout()
 plt.savefig(os.path.join(EXAMPLE_DIR, "qualitative_waveforms.png"), dpi=300, bbox_inches='tight')
 
-q_mat = q_emb.numpy().reshape(16, 32)
-f_mat = f_emb.numpy().reshape(16, 32)
-cf_mat = cf_emb.numpy().reshape(16, 32)
-
-diff_f = np.abs(q_mat - f_mat)
-diff_cf = np.abs(q_mat - cf_mat)
-
-fig2 = plt.figure(figsize=(16, 8))
-fig2.suptitle('Latent Space "Semantic Fingerprints" (512d reshaped to 16x32)', fontsize=18, fontweight='bold', y=0.98)
-
-vmin_emb = min(q_mat.min(), f_mat.min(), cf_mat.min())
-vmax_emb = max(q_mat.max(), f_mat.max(), cf_mat.max())
-
-ax1 = plt.subplot(2, 3, 1)
-im1 = ax1.imshow(q_mat, cmap='viridis', vmin=vmin_emb, vmax=vmax_emb, aspect='auto')
-ax1.set_title(f'Query (Digit {q_label})', fontsize=14, fontweight='bold')
-ax1.axis('off')
-
-ax2 = plt.subplot(2, 3, 2)
-im2 = ax2.imshow(f_mat, cmap='viridis', vmin=vmin_emb, vmax=vmax_emb, aspect='auto')
-ax2.set_title(f'Factual Match (Digit {f_label})', fontsize=14, fontweight='bold')
-ax2.axis('off')
-
-ax3 = plt.subplot(2, 3, 3)
-im3 = ax3.imshow(cf_mat, cmap='viridis', vmin=vmin_emb, vmax=vmax_emb, aspect='auto')
-ax3.set_title(f'Counterfactual (Digit {cf_label})', fontsize=14, fontweight='bold')
-ax3.axis('off')
-
-cbar_ax1 = fig2.add_axes([0.92, 0.55, 0.015, 0.35])
-fig2.colorbar(im3, cax=cbar_ax1, label='Activation Value')
-
-vmax_diff = max(diff_f.max(), diff_cf.max())
-
-ax5 = plt.subplot(2, 3, 5)
-im5 = ax5.imshow(diff_f, cmap='Reds', vmin=0, vmax=vmax_diff, aspect='auto')
-ax5.set_title(f'Error: Query vs Factual\n(Mean Error: {diff_f.mean():.4f})', fontsize=12, fontweight='bold', color='darkred')
-ax5.axis('off')
-
-ax6 = plt.subplot(2, 3, 6)
-im6 = ax6.imshow(diff_cf, cmap='Reds', vmin=0, vmax=vmax_diff, aspect='auto')
-ax6.set_title(f'Error: Query vs Counterfactual\n(Mean Error: {diff_cf.mean():.4f})', fontsize=12, fontweight='bold', color='darkred')
-ax6.axis('off')
-
-cbar_ax2 = fig2.add_axes([0.92, 0.1, 0.015, 0.35])
-fig2.colorbar(im6, cax=cbar_ax2, label='Absolute Difference')
-
-plt.subplots_adjust(wspace=0.1, hspace=0.3, right=0.9)
-plt.savefig(os.path.join(EXAMPLE_DIR, "semantic_fingerprints.png"), dpi=300, bbox_inches='tight')
-plt.show()
-
 import torchaudio.transforms as T
 
 
@@ -202,28 +152,28 @@ mel_q = get_mel_heatmap(q_wave)
 mel_f = get_mel_heatmap(wave_f)
 mel_cf = get_mel_heatmap(wave_cf)
 
-fig3, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True, sharey=True)
-fig3.suptitle('Acoustic Representation: Mel-Spectrogram Heatmaps', fontsize=18, fontweight='bold', y=0.96)
+fig3, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+fig3.suptitle('Acoustic Representation: Mel-Spectrogram Heatmaps', fontsize=18, fontweight='bold', y=1.05)
 
 cmap_audio = 'magma'
 
 im1 = ax1.imshow(mel_q, aspect='auto', origin='lower', cmap=cmap_audio)
-ax1.set_title(f'Query (Digit {q_label})', fontsize=14, fontweight='bold', color='#333333')
+ax1.set_title(f'Query (Digit {q_label})', fontsize=14, fontweight='bold')
 ax1.set_ylabel('Mel Bins (Frequency)')
+ax1.set_xlabel('Time Frames')
 
 im2 = ax2.imshow(mel_f, aspect='auto', origin='lower', cmap=cmap_audio)
 ax2.set_title(f'Factual Match (Digit {f_label})', fontsize=14, fontweight='bold', color='#2ca02c')
-ax2.set_ylabel('Mel Bins (Frequency)')
+ax2.set_xlabel('Time Frames')
 
 im3 = ax3.imshow(mel_cf, aspect='auto', origin='lower', cmap=cmap_audio)
 ax3.set_title(f'Nearest Counterfactual (Digit {cf_label})', fontsize=14, fontweight='bold', color='#d62728')
-ax3.set_ylabel('Mel Bins (Frequency)')
 ax3.set_xlabel('Time Frames')
 
-fig3.subplots_adjust(right=0.85, hspace=0.3)
-cbar_ax = fig3.add_axes([0.88, 0.15, 0.02, 0.7])
-fig3.colorbar(im3, cax=cbar_ax, format='%+2.0f dB', label='Magnitude (dB)')
+plt.tight_layout()
 
-mel_path = os.path.join(EXAMPLE_DIR, "mel_spectrograms_heatmap.png")
+fig3.colorbar(im3, ax=[ax1, ax2, ax3], format='%+2.0f dB', label='Magnitude (dB)', location='right', shrink=0.8)
+
+mel_path = os.path.join(EXAMPLE_DIR, "mel_spectrograms_horizontal.png")
 plt.savefig(mel_path, dpi=300, bbox_inches='tight')
 plt.show()
