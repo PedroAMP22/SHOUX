@@ -40,14 +40,16 @@ The ROAD benchmark confirms the model's robustness: the latent representation re
 
 
 ## 📝 Citation
+
 If you use this work in your research, please cite:
-@misc{martin2026ssnn,
-  title={SSNN-XCBR: A Siamese-Spiking Neural Network Architecture for Audio Case-Based Explanations},
-  author={Mart{\'i}n-Pel{\'a}ez, Pedro A. and Caro-Mart{\'i}nez, Marta},
-  year={2026},
-  howpublished={Technical Report, Project SHOUX, GAIA Group},
-  institution={Department of Software Engineering and Artificial Intelligence, Universidad Complutense de Madrid},
-  address={Madrid, Spain}
-}
+
+ - Title: SSNN-XCBR: A Siamese-Spiking Neural Network Architecture for Audio Case-Based Explanations
+
+ - Authors: P.A Martin Pelaez, M. Caro-Martinez  
+
+ - Year: 2026,
+
+ - Department of Software Engineering and Artificial Intelligence, Universidad Complutense de Madrid
+
 ---
 Developed as part of the research by pedro Antonio Martín Pelaéz under the supervision of marta.
