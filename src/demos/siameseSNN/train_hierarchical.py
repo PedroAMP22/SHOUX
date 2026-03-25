@@ -8,33 +8,25 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
 
-# Asegurar rutas
 directorio_raiz = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if directorio_raiz not in sys.path:
     sys.path.append(directorio_raiz)
 
 from classes import SiameseAudioMNIST, SiameseSNN
 
-# Configuración
 DATA_ROOT = "AudioMNIST_split"
 BACKBONE_PATH = "src/demos/siameseSNN/models/snn_pop_audio_explainable.pth" 
 SIAMESE_SAVE_PATH = "./src/demos/siameseSNN/models/snn_siamese_model.pt"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# LA MAGIA: HIERARCHICAL CONTRASTIVE LOSS
-# ==========================================
+
 def hierarchical_contrastive_loss(emb1, emb2, same_digit, same_speaker, margin_diff=1.5, margin_sim=0.5):
     dist = F.pairwise_distance(emb1, emb2)
     
-    # Nivel 1: Mismo dígito, mismo locutor -> Distancia ideal = 0.0
     loss_exact = (same_digit * same_speaker) * torch.pow(dist, 2)
     
-    # Nivel 2: Mismo dígito, DISTINTO locutor -> Distancia ideal = margin_sim (ej. 0.5)
-    # Queremos que estén en el mismo macro-cluster, pero respetando su diferencia acústica
     loss_similar = (same_digit * (1 - same_speaker)) * torch.pow(dist - margin_sim, 2)
     
-    # Nivel 3: Distinto dígito -> Distancia ideal > margin_diff (ej. 1.5)
     loss_diff = (1 - same_digit) * torch.pow(torch.clamp(margin_diff - dist, min=0.0), 2)
     
     return torch.mean(loss_exact + loss_similar + loss_diff)
@@ -43,7 +35,7 @@ def validate(model, loader, device):
     model.eval()
     val_loss = 0
     all_dists = []
-    all_labels =[] # Guardaremos same_digit para el AUC
+    all_labels =[]
     
     with torch.no_grad():
         for x1, x2, same_digit, same_speaker in loader:
@@ -108,7 +100,6 @@ if __name__ == "__main__":
             torch.save(model.state_dict(), SIAMESE_SAVE_PATH)
             print(f"Model save (Val Loss: {best_val_loss:.4f})")
     
-    # --- TEST FINAL ---
     print("\n" + "="*30)
     print("Eval")
     print("="*30)

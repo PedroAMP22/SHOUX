@@ -133,7 +133,6 @@ plt.savefig(os.path.join(EXAMPLE_DIR, "qualitative_waveforms.png"), dpi=300, bbo
 
 import torchaudio.transforms as T
 
-
 mel_transform = T.MelSpectrogram(
     sample_rate=8000,
     n_fft=400,
@@ -143,7 +142,7 @@ mel_transform = T.MelSpectrogram(
 db_transform = T.AmplitudeToDB(stype='power', top_db=80)
 
 def get_mel_heatmap(wave_np):
-    wave_t = torch.tensor(wave_np).unsqueeze(0).float() # [1, T]
+    wave_t = torch.tensor(wave_np).unsqueeze(0).float() 
     mel = mel_transform(wave_t)
     mel_db = db_transform(mel).squeeze(0).numpy()
     return mel_db
@@ -152,27 +151,48 @@ mel_q = get_mel_heatmap(q_wave)
 mel_f = get_mel_heatmap(wave_f)
 mel_cf = get_mel_heatmap(wave_cf)
 
-fig3, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
-fig3.suptitle('Acoustic Representation: Mel-Spectrogram Heatmaps', fontsize=18, fontweight='bold', y=1.05)
+def get_active_frames(mel_db):
+    col_max = mel_db.max(axis=0)
+    active_cols = np.where(col_max > mel_db.min() + 1e-3)[0]
+    return active_cols[-1] if len(active_cols) > 0 else mel_db.shape[1]
+
+max_q = get_active_frames(mel_q)
+max_f = get_active_frames(mel_f)
+max_cf = get_active_frames(mel_cf)
+
+max_frame = max(max_q, max_f, max_cf)
+max_frame = min(mel_q.shape[1], max_frame + 5)
+
+mel_q = mel_q[:, :max_frame]
+mel_f = mel_f[:, :max_frame]
+mel_cf = mel_cf[:, :max_frame]
+
+fig3, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 7), sharey=True)
+fig3.suptitle('Acoustic Representation: Mel-Spectrogram Heatmaps', fontsize=24, fontweight='bold', y=1.05)
 
 cmap_audio = 'magma'
 
 im1 = ax1.imshow(mel_q, aspect='auto', origin='lower', cmap=cmap_audio)
-ax1.set_title(f'Query (Digit {q_label})', fontsize=14, fontweight='bold')
-ax1.set_ylabel('Mel Bins (Frequency)')
-ax1.set_xlabel('Time Frames')
+ax1.set_title(f'Query (Digit {q_label})', fontsize=20, fontweight='bold')
+ax1.set_ylabel('Mel Bins (Frequency)', fontsize=16)
+ax1.set_xlabel('Time Frames', fontsize=16)
+ax1.tick_params(axis='both', which='major', labelsize=14)
 
 im2 = ax2.imshow(mel_f, aspect='auto', origin='lower', cmap=cmap_audio)
-ax2.set_title(f'Factual Match (Digit {f_label})', fontsize=14, fontweight='bold', color='#2ca02c')
-ax2.set_xlabel('Time Frames')
+ax2.set_title(f'Factual Match (Digit {f_label})', fontsize=20, fontweight='bold', color='#2ca02c')
+ax2.set_xlabel('Time Frames', fontsize=16)
+ax2.tick_params(axis='both', which='major', labelsize=14)
 
 im3 = ax3.imshow(mel_cf, aspect='auto', origin='lower', cmap=cmap_audio)
-ax3.set_title(f'Nearest Counterfactual (Digit {cf_label})', fontsize=14, fontweight='bold', color='#d62728')
-ax3.set_xlabel('Time Frames')
+ax3.set_title(f'Nearest Counterfactual (Digit {cf_label})', fontsize=20, fontweight='bold', color='#d62728')
+ax3.set_xlabel('Time Frames', fontsize=16)
+ax3.tick_params(axis='both', which='major', labelsize=14)
 
 plt.tight_layout()
 
-fig3.colorbar(im3, ax=[ax1, ax2, ax3], format='%+2.0f dB', label='Magnitude (dB)', location='right', shrink=0.8)
+cbar = fig3.colorbar(im3, ax=[ax1, ax2, ax3], format='%+2.0f dB', location='right', shrink=0.85, pad=0.02)
+cbar.set_label('Magnitude (dB)', fontsize=16)
+cbar.ax.tick_params(labelsize=14)
 
 mel_path = os.path.join(EXAMPLE_DIR, "mel_spectrograms_horizontal.png")
 plt.savefig(mel_path, dpi=300, bbox_inches='tight')
