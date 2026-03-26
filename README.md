@@ -54,19 +54,5 @@ Our Siamese SNN generates clearly segregated semantic "islands," significantly r
   </tr>
 </table>
 
-
-
-## Citation
-
-If you use this work in your research, please cite:
-
- - Title: SSNN-XCBR: A Siamese-Spiking Neural Network Architecture for Audio Case-Based Explanations
-
- - Authors: P.A Martin Pelaez, M. Caro-Martinez  
-
- - Year: 2026,
-
- - Department of Software Engineering and Artificial Intelligence, Universidad Complutense de Madrid
-
 ---
-Developed as part of the research by Pedro Antonio Martín Pelaez under the supervision of Marta Caro Martiez.
+Developed as part of the research by Pedro Antonio Martín Pelaez under the supervision of Marta Caro Martinez.
