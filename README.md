@@ -40,6 +40,22 @@ Our Siamese SNN generates clearly segregated semantic "islands," significantly r
 
 > **Notes:** **T/Q**: Time per query (ms); **F**: Factual RMSE; **CF**: Counterfactual RMSE; **F.D**: Factual Diversity; **CF.D**: Counterfactual Diversity.
 
+### ROAD Graphs
+<table>
+  <tr>
+    <td><img src="src/demos/siameseSNN/results/imgs/road_explanation_k1.png" width="300" alt="ROAD K=1"></td>
+    <td><img src="src/demos/siameseSNN/results/imgs/road_explanation_k3.png" width="300" alt="ROAD K=3"></td>
+    <td><img src="src/demos/siameseSNN/results/imgs/road_explanation_k5.png" width="300" alt="ROAD K=5"></td>
+  </tr>
+  <tr align="center">
+    <td><b>ROAD K=1</b></td>
+    <td><b>ROAD K=3</b></td>
+    <td><b>ROAD K=5</b></td>
+  </tr>
+</table>
+
+
+
 ## Citation
 
 If you use this work in your research, please cite:
