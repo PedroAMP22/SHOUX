@@ -6,16 +6,12 @@
 
 This repository contains the implementation of a **Siamese Spiking Neural Network (SSNN)** designed for robust audio retrieval and the generation of faithful factual and counterfactual explanations. Unlike traditional acoustic-based methods (e.g., MFCC), this model learns a **semantic latent space** optimized for class separability, temporal dynamics, and computational efficiency.
 
-## Key Features
+## Features
 
 - **Explainable-by-Design Backbone:** `PopNetAudio` architecture utilizing **Population Coding** (class-specific expert neurons) to ensure intrinsic transparency.
 - **Temporal Siamese Head:** A learned convolutional projection head that emulates biological spike-train metrics (Van Rossum distance) while maintaining Euclidean efficiency.
 - **Hierarchical Representation Learning:** A custom **Hierarchical Contrastive Loss** that organizes the latent space into semantic macro-clusters (digits) and acoustic micro-clusters (speakers).
-- **Advanced xAI Evaluation Framework:**
-    - **Semantic Fidelity:** Uses **Wav2Vec 2.0** as an impartial "Gold Standard" judge to measure Factual and Counterfactual RMSE.
-    - **Causal Validation:** Implements the **ROAD (Remove and Debias)** benchmark to verify that the model relies on causal phonetic features rather than background noise.
-    - **Latent Topology Metrics:** Quantitative assessment of Inter-class Diversity and Intra-class Compactness.
-- **High Efficiency:** Real-time inference and retrieval in **~2ms** (over 800x faster than raw biological metrics).
+- **High Efficiency:** Real-time inference and retrieval in **~2ms**.
 
 ## Architecture
 
@@ -24,22 +20,27 @@ The system consists of two critical components:
 1.  **Backbone (SNN):** Processes raw 1D audio waveforms into binary spike trains using LIF (*Leaky Integrate-and-Fire*) neurons. It features a hidden layer of 250 neurons divided into 10 specialized expert groups.
 2.  **Siamese Projection Head:** A high-resolution temporal head that applies learned grouped convolutions ($K=25$) and adaptive pooling to generate a 512-dimensional semantic embedding.
 
-## Benchmark Results (AudioMNIST)
-
-| Method | Time/Query | Recall@5 | F. RMSE (↓) | CF. RMSE (↑) | CF. Div (↑) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Siamese SNN (Ours)** | **2.10 ms** | **93.1%** | 0.143 | 0.181 | **5.10** |
-| MFCC (SOTA) | 2.72 ms | 88.2% | 0.134 | 0.177 | 5.03 |
-| Van Rossum | 1709 ms | 94.4% | 0.139 | 0.181 | 5.10 |
+## Results (AudioMNIST)
 
 ### Latent Space Topology (t-SNE)
 Our Siamese SNN generates clearly segregated semantic "islands," significantly reducing the boundary overlap observed in MFCC. This ensures that counterfactual explanations (nearest enemies) are safe, distinct, and unambiguous.
 
-### Causal Fidelity (ROAD)
-The ROAD benchmark confirms the model's robustness: the latent representation remains unchanged when up to 50% of irrelevant noise is removed (LeRF $\approx$ 0), while it collapses immediately when key phonetic segments are occluded (MoRF).
+![Resultados SSNN](src/demos/siameseSNN/results/imgs/tsne_combined.png)
 
 
-## 📝 Citation
+### Performance Comparison Across $K$ Neighbors
+
+| Method | T/Q (ms) | F (K=1) | CF (K=1) | F (K=3) | CF (K=3) | F. D (K=3) | CF. D (K=3) | F (K=5) | CF (K=5) | F. D (K=5) | CF. D (K=5) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| SSNN-XCBR | 2.10 | 0.14 | 0.17 | 0.14 | 0.17 | 3.95 | 5.13 | 0.14 | 0.18 | 3.96 | 5.10 |
+| V.R | 1709.24 | 0.13 | 0.17 | 0.13 | 0.17 | 3.82 | 5.14 | 0.13 | 0.18 | 3.86 | 5.10 |
+| MFCC | 2.72 | 0.13 | 0.17 | 0.13 | 0.17 | 3.73 | 5.05 | 0.13 | 0.17 | 3.75 | 5.03 |
+| DWT | 0.23 | 0.13 | 0.18 | 0.13 | 0.18 | 3.82 | 5.10 | 0.13 | 0.18 | 3.85 | 5.02 |
+| Pearson | 41.33 | 0.14 | 0.17 | 0.14 | 0.17 | 4.08 | 5.02 | 0.14 | 0.18 | 4.10 | 5.03 |
+
+> **Notes:** **T/Q**: Time per query (ms); **F**: Factual RMSE; **CF**: Counterfactual RMSE; **F.D**: Factual Diversity; **CF.D**: Counterfactual Diversity.
+
+## Citation
 
 If you use this work in your research, please cite:
 
@@ -52,4 +53,4 @@ If you use this work in your research, please cite:
  - Department of Software Engineering and Artificial Intelligence, Universidad Complutense de Madrid
 
 ---
-Developed as part of the research by pedro Antonio Martín Pelaéz under the supervision of marta.
+Developed as part of the research by Pedro Antonio Martín Pelaez under the supervision of Marta Caro Martiez.
