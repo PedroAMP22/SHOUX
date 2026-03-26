@@ -12,43 +12,34 @@ directorio_raiz = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if directorio_raiz not in sys.path:
     sys.path.append(directorio_raiz)
 
-from classes import SiameseSNN, AudioMNISTEvalDataset
+from classes import SiameseSNN
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device =  "cpu"
 DATA_ROOT = "AudioMNIST_split"
 BACKBONE_PATH = "src/demos/siameseSNN/models/snn_pop_audio_explainable.pth" 
 SIAMESE_SAVE_PATH = "./src/demos/siameseSNN/models/snn_siamese_model.pt"
+DB_CACHE_PATH = "db_cache.pt"
 
-NUM_SAMPLES = 50       
+NUM_SAMPLES = 100
 NUM_SEGMENTS = 16      
 TARGET_LEN = 8000
 METHODS =["SNN Siamese", "MFCC", "DWT", "Pearson"]
+K_VALUES = [1, 3, 5]
 
-
-def apply_vad_and_align(waveform, threshold_ratio=0.05, target_len=TARGET_LEN):
-    if waveform.dim() == 1: waveform = waveform.unsqueeze(0)
-    abs_wave = waveform.abs().squeeze()
-    if abs_wave.dim() == 0 or abs_wave.max() == 0: return torch.zeros((1, target_len))
-    threshold = abs_wave.max() * threshold_ratio
-    active_indices = torch.where(abs_wave > threshold)[0]
-    if len(active_indices) == 0: return torch.zeros((1, target_len))
-    trimmed = waveform[:, active_indices[0].item():active_indices[-1].item()+1]
-    if trimmed.size(1) > target_len: return trimmed[:, :target_len]
-    return F.pad(trimmed, (0, target_len - trimmed.size(1)))
 
 def extract_mfcc(waveform):
     mfcc_tr = torchaudio.transforms.MFCC(
         sample_rate=8000, n_mfcc=13,
         melkwargs={"n_fft": 400, "hop_length": 160, "n_mels": 23, "center": False}
     ).to(waveform.device)
-    return mfcc_tr(waveform).contiguous().view(1, -1) # [1, features]
+    return mfcc_tr(waveform).contiguous().view(1, -1)
 
 def extract_dwt(waveform):
     wave_np = waveform.squeeze().cpu().numpy()
     coeffs = pywt.wavedec(wave_np, 'db4', level=4)
     features = np.concatenate([[np.mean(c), np.std(c), np.sum(c**2)] for c in coeffs])
     feat_tensor = torch.tensor(features / (np.linalg.norm(features) + 1e-9), dtype=torch.float32)
-    return feat_tensor.unsqueeze(0).to(waveform.device) # [1, features]
+    return feat_tensor.unsqueeze(0).to(waveform.device)
 
 def get_representation(model, waveform, method):
     if method == "SNN Siamese":
@@ -59,119 +50,156 @@ def get_representation(model, waveform, method):
     elif method == "DWT":
         return extract_dwt(waveform)
     elif method == "Pearson":
-        wave_c = waveform - waveform.mean()
-        return wave_c.view(1, -1)
+        return (waveform - waveform.mean()).view(1, -1)
 
 def get_distance(rep1, rep2, method):
     if method in ["SNN Siamese", "DWT"]:
         return torch.cdist(rep1, rep2, p=2).item()
-    elif method in["MFCC", "Pearson"]:
+    else:
         return (1 - F.cosine_similarity(rep1, rep2, dim=1)).item()
-
-def calculate_importance(model, waveform, method, num_segments=16):
-    orig_rep = get_representation(model, waveform, method)
-    segment_length = TARGET_LEN // num_segments
-    importances =[]
+ 
+def calculate_explanation_importance(model, q_rep, exp_wave, method):
+    orig_exp_rep = get_representation(model, exp_wave, method)
+    orig_dist = get_distance(q_rep, orig_exp_rep, method)
     
-    for i in range(num_segments):
-        occluded_wave = waveform.clone()
-        start_idx = i * segment_length
-        end_idx = start_idx + segment_length
-        occluded_wave[..., start_idx:end_idx] = 0.0
-        
-        occ_rep = get_representation(model, occluded_wave, method)
-        dist = get_distance(orig_rep, occ_rep, method)
-        importances.append(dist)
-        
+    segment_length = TARGET_LEN // NUM_SEGMENTS
+    importances =[]
+    for i in range(NUM_SEGMENTS):
+        occ_wave = exp_wave.clone()
+        occ_wave[..., i*segment_length : (i+1)*segment_length] = 0.0
+        occ_rep = get_representation(model, occ_wave, method)
+        importances.append(get_distance(q_rep, occ_rep, method) - orig_dist)
     return np.array(importances)
 
-def apply_masking(waveform, importances, mask_percentage, mode="MoRF"):
-    num_segments = len(importances)
-    num_to_mask = int(num_segments * mask_percentage)
+def apply_masking(waveform, importances, mask_percentage, mode):
+    num_to_mask = int(NUM_SEGMENTS * mask_percentage)
     if num_to_mask == 0: return waveform
-        
-    if mode == "MoRF": target_indices = np.argsort(importances)[::-1][:num_to_mask]
-    elif mode == "LeRF": target_indices = np.argsort(importances)[:num_to_mask]
-        
-    masked_wave = waveform.clone()
-    segment_length = TARGET_LEN // num_segments
-    for idx in target_indices:
-        start_idx = idx * segment_length
-        end_idx = start_idx + segment_length
-        masked_wave[..., start_idx:end_idx] = 0.0
-        
-    return masked_wave
+    if mode == "MoRF": idxs = np.argsort(importances)[::-1][:num_to_mask]
+    else: idxs = np.argsort(importances)[:num_to_mask]
+    
+    masked = waveform.clone()
+    seg_len = TARGET_LEN // NUM_SEGMENTS
+    for i in idxs: masked[..., i*seg_len : (i+1)*seg_len] = 0.0
+    return masked
 
 if __name__ == "__main__":
+    print("Cargando modelo y base de datos...")
     model = SiameseSNN(BACKBONE_PATH).to(device)
     ckpt = torch.load(SIAMESE_SAVE_PATH, map_location=device)
     model.load_state_dict(ckpt['model_state'] if 'model_state' in ckpt else ckpt, strict=True)
     model.eval() 
 
-    test_ds = AudioMNISTEvalDataset(f"{DATA_ROOT}/test")
+    if not os.path.exists(DB_CACHE_PATH):
+        raise FileNotFoundError("Missing db_cache.pt")
+    db = torch.load(DB_CACHE_PATH, weights_only=False)
+
     mask_percentages =[0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
     
-    results = {m: {"MoRF": {p:[] for p in mask_percentages}, 
-                   "LeRF": {p:[] for p in mask_percentages}} for m in METHODS}
-    
-    print(f"\nIniciando ROAD Comparativo sobre {NUM_SAMPLES} audios...")
+    results = {k: {m: {
+        "Factual": {"MoRF": {p: [] for p in mask_percentages}, "LeRF": {p:[] for p in mask_percentages}},
+        "Counterfactual": {"MoRF": {p:[] for p in mask_percentages}, "LeRF": {p:[] for p in mask_percentages}}
+    } for m in METHODS} for k in K_VALUES}
+
     np.random.seed(42)
-    indices = np.random.choice(len(test_ds), NUM_SAMPLES, replace=False)
+    indices = np.random.choice(len(db['filenames']), NUM_SAMPLES, replace=False)
     
+    max_k = max(K_VALUES) 
+
     with torch.no_grad():
-        for idx in tqdm(indices, desc="Evaluando"):
-            wave_raw, _, _ = test_ds[idx]
-            wave_aligned = apply_vad_and_align(wave_raw)
-            
-            if wave_aligned.dim() == 2: wave_input = wave_aligned.unsqueeze(0)
-            else: wave_input = wave_aligned.unsqueeze(0).unsqueeze(0)
-            if wave_input.dim() == 4: wave_input = wave_input.squeeze(2)
-            
-            wave_input = wave_input.to(device)
+        for idx in tqdm(indices, desc="Evaluando ROAD"):
+            q_label = db['labels'][idx].item()
+            q_wave = db['raw_c'][idx].view(1, 1, -1).to(device)
+
+            mask_self = torch.arange(len(db['filenames'])) != idx
+            mask_factual = mask_self & (db['labels'] == q_label)
+            mask_cf = db['labels'] != q_label
 
             for m in METHODS:
-                orig_rep = get_representation(model, wave_input, m)
-                importances = calculate_importance(model, wave_input, m, NUM_SEGMENTS)
+                q_rep = get_representation(model, q_wave, m)
                 
-                for p in mask_percentages:
-                    for mode in ["MoRF", "LeRF"]:
-                        masked_wave = apply_masking(wave_input, importances, p, mode)
-                        new_rep = get_representation(model, masked_wave, m)
-                        error = get_distance(orig_rep, new_rep, m)
-                        
-                        results[m][mode][p].append(error)
+                if m == "SNN Siamese": d_all = torch.cdist(q_rep, db['snn'], p=2).squeeze(0)
+                elif m == "MFCC": d_all = torch.cdist(q_rep, db['mfcc'], p=2).squeeze(0)
+                elif m == "DWT": d_all = torch.cdist(q_rep, db['dwt'], p=2).squeeze(0)
+                elif m == "Pearson": d_all = 1 - F.cosine_similarity(q_rep.cpu(), db['raw_c'].squeeze(1)).to(device)
 
+                top_f_idx = torch.where(mask_factual)[0][torch.topk(d_all[mask_factual], max_k, largest=False)[1]]
+                top_cf_idx = torch.where(mask_cf)[0][torch.topk(d_all[mask_cf], max_k, largest=False)[1]]
+
+                for rank, f_idx in enumerate(top_f_idx):
+                    exp_wave = db['raw_c'][f_idx].view(1, 1, -1).to(device)
+                    importances = calculate_explanation_importance(model, q_rep, exp_wave, m)
+                    orig_dist = get_distance(q_rep, get_representation(model, exp_wave, m), m)
+                    
+                    for p in mask_percentages:
+                        for mode in["MoRF", "LeRF"]:
+                            masked_wave = apply_masking(exp_wave, importances, p, mode)
+                            new_dist = get_distance(q_rep, get_representation(model, masked_wave, m), m)
+                            degradation = new_dist - orig_dist
+                            
+                            for k in K_VALUES:
+                                if rank < k:
+                                    results[k][m]["Factual"][mode][p].append(degradation)
+
+                for rank, cf_idx in enumerate(top_cf_idx):
+                    exp_wave = db['raw_c'][cf_idx].view(1, 1, -1).to(device)
+                    importances = calculate_explanation_importance(model, q_rep, exp_wave, m)
+                    orig_dist = get_distance(q_rep, get_representation(model, exp_wave, m), m)
+                    
+                    for p in mask_percentages:
+                        for mode in ["MoRF", "LeRF"]:
+                            masked_wave = apply_masking(exp_wave, importances, p, mode)
+                            new_dist = get_distance(q_rep, get_representation(model, masked_wave, m), m)
+                            degradation = new_dist - orig_dist
+                            
+                            for k in K_VALUES:
+                                if rank < k:
+                                    results[k][m]["Counterfactual"][mode][p].append(degradation)
 
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
-    fig.suptitle('ROAD Benchmark: Explanation Fidelity Comparison', fontsize=18, fontweight='bold', y=1.02)
-
     colors = {'SNN Siamese': '#d62728', 'MFCC': '#ff7f0e', 'DWT': '#1f77b4', 'Pearson': '#9467bd'}
     markers = {'SNN Siamese': 'o', 'MFCC': 's', 'DWT': '^', 'Pearson': 'D'}
+    x_vals = [p * 100 for p in mask_percentages]
 
-    x_vals =[p * 100 for p in mask_percentages]
+    titles =[
+        ("Factual", "MoRF", "Factual: MoRF (Higher is Better)"),
+        ("Factual", "LeRF", "Factual: LeRF (Lower is Better)"),
+        ("Counterfactual", "MoRF", "Counterfactual: MoRF (Higher is Better)"),
+        ("Counterfactual", "LeRF", "Counterfactual: LeRF (Lower is Better)")
+    ]
 
-    for m in METHODS:
-        y_morf = [np.mean(results[m]["MoRF"][p]) for p in mask_percentages]
-        linewidth = 3 if m == 'SNN Siamese' else 2
-        ax1.plot(x_vals, y_morf, label=m, color=colors[m], marker=markers[m], linewidth=linewidth, markersize=8)
+    for k in K_VALUES:
+        print(f"\n{'='*80}")
+        print(f" K = {k}")
+        print(f"{'='*80}")
+        print(f"{'Method':<15} | {'Factual MoRF':<18} | {'Factual LeRF':<18} | {'CF MoRF':<15} | {'CF LeRF'}")
+        print("-" * 80)
+        
+        for m in METHODS:
+            f_morf_50 = np.mean(results[k][m]["Factual"]["MoRF"][0.5])
+            f_lerf_50 = np.mean(results[k][m]["Factual"]["LeRF"][0.5])
+            cf_morf_50 = np.mean(results[k][m]["Counterfactual"]["MoRF"][0.5])
+            cf_lerf_50 = np.mean(results[k][m]["Counterfactual"]["LeRF"][0.5])
+            print(f"{m:<15} | {f_morf_50:>18.4f} | {f_lerf_50:>18.4f} | {cf_morf_50:>15.4f} | {cf_lerf_50:>12.4f}")
 
-    ax1.set_title('MoRF: Removing Most Relevant Features (Higher is Better)', fontsize=14, fontweight='bold')
-    ax1.set_xlabel('Percentage of Audio Erased (%)', fontsize=12)
-    ax1.set_ylabel('Latent Degradation (Distance to Original)', fontsize=12)
-    ax1.legend(fontsize=11)
-    ax1.grid(True, linestyle='--', alpha=0.7)
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True)
+        fig.suptitle(f'Explanation Quality via ROAD (Avg over Top-{k} Explanations)', fontsize=18, fontweight='bold', y=0.96)
 
-    for m in METHODS:
-        y_lerf = [np.mean(results[m]["LeRF"][p]) for p in mask_percentages]
-        linewidth = 3 if m == 'SNN Siamese' else 2
-        ax2.plot(x_vals, y_lerf, label=m, color=colors[m], marker=markers[m], linewidth=linewidth, markersize=8)
+        for i, (exp_type, mode, title) in enumerate(titles):
+            ax = axes[i//2, i%2]
+            for m in METHODS:
+                y = [np.mean(results[k][m][exp_type][mode][p]) for p in mask_percentages]
+                lw = 3 if m == 'SNN Siamese' else 2
+                ax.plot(x_vals, y, label=m, color=colors[m], marker=markers[m], linewidth=lw, markersize=8)
+            
+            ax.set_title(title, fontsize=14, fontweight='bold')
+            ax.grid(True, linestyle='--', alpha=0.7)
+            if i >= 2: ax.set_xlabel("Percentage of Explanation Erased (%)", fontsize=12)
+            if i % 2 == 0: ax.set_ylabel("$\Delta$ Distance to Query", fontsize=12)
+            if i == 0: ax.legend(fontsize=11)
 
-    ax2.set_title('LeRF: Removing Least Relevant Features (Lower is Better)', fontsize=14, fontweight='bold')
-    ax2.set_xlabel('Percentage of Audio Erased (%)', fontsize=12)
-    ax2.legend(fontsize=11)
-    ax2.grid(True, linestyle='--', alpha=0.7)
-
-    plt.tight_layout()
-    plt.savefig("road_comparative_all.png", dpi=300, bbox_inches='tight')
+        plt.tight_layout()
+        filename = f"road_explanation_k{k}.png"
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"-> Gráfica guardada: {filename}")
+        
     plt.show()
