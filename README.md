@@ -23,11 +23,16 @@ The system consists of two critical components:
 ## Results (AudioMNIST)
 
 ### Latent Space Topology (t-SNE)
-Our Siamese SNN generates clearly segregated semantic "islands," significantly reducing the boundary overlap observed in MFCC. This ensures that counterfactual explanations (nearest enemies) are safe, distinct, and unambiguous.
+Our Siamese SNN generates clearly segregated semantic "islands", significantly reducing the boundary overlap observed in MFCC. This ensures that counterfactual explanations (nearest enemies) are safe, distinct, and unambiguous.
 
-![Resultados SSNN](src/demos/siameseSNN/results/imgs/tsne_combined.png)
-
-
+<table>
+  <tr>
+    <td><img src="src/demos/siameseSNN/results/imgs/tsne_comp.png" alt="TSNE Comparation"></td>
+  </tr>
+  <tr align="center">
+    <td><b>TSNE Comparation</b></td>
+  </tr>
+</table>
 ### Performance Comparison Across $K$ Neighbors
 
 | Method | T/Q (ms) | F (K=1) | CF (K=1) | F (K=3) | CF (K=3) | F. D (K=3) | CF. D (K=3) | F (K=5) | CF (K=5) | F. D (K=5) | CF. D (K=5) |
@@ -43,7 +48,7 @@ Our Siamese SNN generates clearly segregated semantic "islands," significantly r
 ### ROAD Graph
 <table>
   <tr>
-    <td><img src="src/demos/siameseSNN/results/imgs/road_comparative_all.png" alt="ROAD K=1"></td>
+    <td><img src="src/demos/siameseSNN/results/imgs/road_comparative_all.png" alt="ROAD MORF & LERF"></td>
   </tr>
   <tr align="center">
     <td><b>ROAD MORF & LERF</b></td>
@@ -51,6 +56,25 @@ Our Siamese SNN generates clearly segregated semantic "islands," significantly r
 </table>
 
 ## Experiment 
+The query $q$ (file $4\_41\_42$.wav) with class $cl_q = 4$, the results are:
+
+| Factual ECs | | | Counterfactual ECs | | |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **EC File** | **EC Class** | **ED** | **EC File** | **EC Class** | **ED** |
+| 4_08_31.wav | 4 | 0.0152 | 1_48_20.wav | 1 | 0.8672 |
+| 4_08_22.wav | 4 | 0.0252 | 5_16_1.wav | 5 | 1.0726 |
+| 4_02_28.wav | 4 | 0.0275 | 2_18_15.wav | 2 | 1.2515 |
+
+### Visual Justification
+
+<table>
+  <tr>
+    <td><img src="example/mel_spectrograms_heatmap.png" alt="Mel Spectogram for Experiment"></td>
+  </tr>
+  <tr align="center">
+    <td><b>Mel Spectogram for Experiment</b></td>
+  </tr>
+</table>
 
 ---
 Developed as part of the research by Pedro Antonio Martín Pelaez under the supervision of Marta Caro Martinez.
